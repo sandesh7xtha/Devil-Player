@@ -113,13 +113,18 @@ fun InteractiveArtworkShowcase(
             Box(
                 modifier = Modifier
                     .fillMaxSize(0.95f)
-                    .scale(glowScale)
+                    // Animated values are read in the layer block so the glow never recomposes.
+                    .graphicsLayer {
+                        scaleX = glowScale
+                        scaleY = glowScale
+                        alpha = glowAlpha
+                    }
                     .clip(CircleShape)
                     .background(
                         Brush.radialGradient(
                             colors = listOf(
-                                accentColor.copy(alpha = glowAlpha),
-                                AuraPrimary.copy(alpha = glowAlpha * 0.6f),
+                                accentColor,
+                                AuraPrimary.copy(alpha = 0.6f),
                                 Color.Transparent
                             )
                         )

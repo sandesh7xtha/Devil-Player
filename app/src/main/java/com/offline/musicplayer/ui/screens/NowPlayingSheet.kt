@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -72,6 +73,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -86,6 +88,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -121,6 +124,7 @@ import com.offline.musicplayer.ui.theme.rememberDominantColor
 fun NowPlayingSheet(
     visible: Boolean,
     playbackState: PlaybackState,
+    positionMs: () -> Long,
     sleepTimerState: SleepTimerState,
     smartModeState: SmartModeState,
     lyricsState: LyricsState,
@@ -165,33 +169,7 @@ fun NowPlayingSheet(
             artworkUri = currentSong.albumArtUri
         )
 
-        var isDraggingSeekbar by remember { mutableStateOf(false) }
-        var draggingPositionMs by remember { mutableFloatStateOf(0f) }
         var showRadioSearchBrowser by remember { mutableStateOf(false) }
-
-        val currentPos = if (isDraggingSeekbar) draggingPositionMs.toLong() else playbackState.currentPosition
-        val duration = playbackState.duration.coerceAtLeast(1L)
-
-        // Pulsing glow animation around the main Play/Pause button
-        val infiniteTransition = rememberInfiniteTransition(label = "fab_pulse")
-        val pulseRingScale by infiniteTransition.animateFloat(
-            initialValue = 1f,
-            targetValue = if (playbackState.isPlaying) 1.25f else 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1200, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "pulse_scale"
-        )
-        val pulseRingAlpha by infiniteTransition.animateFloat(
-            initialValue = if (playbackState.isPlaying) 0.5f else 0f,
-            targetValue = if (playbackState.isPlaying) 0f else 0f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1200, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "pulse_alpha"
-        )
 
         Surface(
             modifier = Modifier.fillMaxSize(),
@@ -215,6 +193,7 @@ fun NowPlayingSheet(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
+                        .systemBarsPadding()
                         .padding(horizontal = 24.dp, vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -471,7 +450,7 @@ fun NowPlayingSheet(
                             offsetMs = playerFeatureSettings.lyricsOffsetMs,
                             trackTitle = currentSong.title,
                             trackArtist = currentSong.artist,
-                            currentPositionMs = currentPos,
+                            positionMs = positionMs,
                             onSeek = onSeek,
                             onRetry = onRetryLyrics,
                             onSearchLyrics = onSearchLyrics,
@@ -492,43 +471,13 @@ fun NowPlayingSheet(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(vertical = 12.dp)
                         )
-                    } else Column(modifier = Modifier.fillMaxWidth()) {
-                        Slider(
-                            value = currentPos.coerceIn(0L, duration).toFloat(),
-                            onValueChange = {
-                                isDraggingSeekbar = true
-                                draggingPositionMs = it
-                            },
-                            onValueChangeFinished = {
-                                onSeek(draggingPositionMs.toLong())
-                                isDraggingSeekbar = false
-                            },
-                            valueRange = 0f..duration.toFloat(),
-                            colors = SliderDefaults.colors(
-                                thumbColor = extractedColors.dominant,
-                                activeTrackColor = extractedColors.dominant,
-                                inactiveTrackColor = AuraSurfaceVariant
-                            ),
-                            modifier = Modifier.fillMaxWidth()
+                    } else {
+                        PlaybackSeekBar(
+                            positionMs = positionMs,
+                            durationMs = playbackState.duration,
+                            accentColor = extractedColors.dominant,
+                            onSeek = onSeek
                         )
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = formatTime(currentPos),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = AuraTextTertiary
-                            )
-                            Text(
-                                text = formatTime(duration),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = AuraTextTertiary
-                            )
-                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -573,13 +522,7 @@ fun NowPlayingSheet(
                             contentAlignment = Alignment.Center
                         ) {
                             if (playbackState.isPlaying) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(76.dp)
-                                        .scale(pulseRingScale)
-                                        .clip(CircleShape)
-                                        .background(extractedColors.dominant.copy(alpha = pulseRingAlpha))
-                                )
+                                PulseRing(color = extractedColors.dominant)
                             }
 
                             BouncingIconButton(onClick = onPlayPause) {
@@ -695,7 +638,7 @@ private fun LiveLyricsPanel(
     lyricsState: LyricsState,
     trackTitle: String,
     trackArtist: String,
-    currentPositionMs: Long,
+    positionMs: () -> Long,
     fontSizeSp: Int,
     offsetMs: Int,
     onSeek: (Long) -> Unit,
@@ -706,16 +649,22 @@ private fun LiveLyricsPanel(
     val listState = rememberLazyListState()
     val lyricsLines = lyricsState.lines.orEmpty()
     val hasLyrics = lyricsLines.isNotEmpty() || !lyricsState.plainLyrics.isNullOrBlank()
-    val lyricPositionMs = (currentPositionMs - offsetMs).coerceAtLeast(0L)
+    val lyricPositionMs: () -> Long = { (positionMs() - offsetMs).coerceAtLeast(0L) }
     var showSearchDialog by remember(lyricsState.trackId) { mutableStateOf(false) }
     var showBrowser by remember(lyricsState.trackId) { mutableStateOf(false) }
     var searchTitle by remember(lyricsState.trackId, trackTitle) { mutableStateOf(trackTitle) }
     var searchArtist by remember(lyricsState.trackId, trackArtist) { mutableStateOf(trackArtist) }
-    val activeLineIndex = lyricsLines.indexOfFirst {
-        lyricPositionMs >= it.startMs && lyricPositionMs < it.endMs
-    }.takeIf { it >= 0 } ?: lyricsLines.indexOfLast {
-        it.startMs <= lyricPositionMs
-    }.coerceAtLeast(0)
+    // Derived, so the panel only recomposes when the active line changes, not every tick.
+    val activeLineIndex by remember(lyricsLines, offsetMs, positionMs) {
+        derivedStateOf {
+            val position = lyricPositionMs()
+            lyricsLines.indexOfFirst {
+                position >= it.startMs && position < it.endMs
+            }.takeIf { it >= 0 } ?: lyricsLines.indexOfLast {
+                it.startMs <= position
+            }.coerceAtLeast(0)
+        }
+    }
 
     LaunchedEffect(activeLineIndex, lyricsState.trackId, lyricsLines.size) {
         if (lyricsLines.isNotEmpty()) {
@@ -841,9 +790,19 @@ private fun LiveLyricsPanel(
                             horizontalArrangement = Arrangement.Center
                         ) {
                             line.words.forEach { word ->
-                                val isSung = lyricPositionMs >= word.endMs
-                                val isActive = lyricPositionMs >= word.startMs &&
-                                    lyricPositionMs < word.endMs
+                                // Each word recomposes only when it changes between upcoming/active/sung.
+                                val progress by remember(word, offsetMs, positionMs) {
+                                    derivedStateOf {
+                                        val position = lyricPositionMs()
+                                        when {
+                                            position >= word.endMs -> 2
+                                            position >= word.startMs -> 1
+                                            else -> 0
+                                        }
+                                    }
+                                }
+                                val isSung = progress == 2
+                                val isActive = progress == 1
                                 val scale by animateFloatAsState(
                                     targetValue = if (isActive) 1.08f else 1f,
                                     label = "lyric_word_scale"
@@ -851,7 +810,10 @@ private fun LiveLyricsPanel(
                                 Text(
                                     text = word.text,
                                     modifier = Modifier
-                                        .scale(scale)
+                                        .graphicsLayer {
+                                            scaleX = scale
+                                            scaleY = scale
+                                        }
                                         .clickable { onSeek((word.startMs + offsetMs).coerceAtLeast(0L)) }
                                         .padding(horizontal = 2.dp, vertical = 2.dp),
                                     color = when {
@@ -1064,4 +1026,92 @@ fun GoogleSearchDialog(
             cookieManager.flush()
         }
     }
+}
+
+/** Seek bar and time labels; the only part of the sheet that recomposes on position ticks. */
+@Composable
+private fun PlaybackSeekBar(
+    positionMs: () -> Long,
+    durationMs: Long,
+    accentColor: Color,
+    onSeek: (Long) -> Unit
+) {
+    var isDragging by remember { mutableStateOf(false) }
+    var dragPositionMs by remember { mutableFloatStateOf(0f) }
+    val duration = durationMs.coerceAtLeast(1L)
+    val current = if (isDragging) dragPositionMs.toLong() else positionMs()
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Slider(
+            value = current.coerceIn(0L, duration).toFloat(),
+            onValueChange = {
+                isDragging = true
+                dragPositionMs = it
+            },
+            onValueChangeFinished = {
+                onSeek(dragPositionMs.toLong())
+                isDragging = false
+            },
+            valueRange = 0f..duration.toFloat(),
+            colors = SliderDefaults.colors(
+                thumbColor = accentColor,
+                activeTrackColor = accentColor,
+                inactiveTrackColor = AuraSurfaceVariant
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = formatTime(current),
+                style = MaterialTheme.typography.labelMedium,
+                color = AuraTextTertiary
+            )
+            Text(
+                text = formatTime(duration),
+                style = MaterialTheme.typography.labelMedium,
+                color = AuraTextTertiary
+            )
+        }
+    }
+}
+
+/** Breathing ring behind the play button; animated values are read in the draw layer only. */
+@Composable
+private fun PulseRing(color: Color) {
+    val transition = rememberInfiniteTransition(label = "fab_pulse")
+    val ringScale by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_scale"
+    )
+    val ringAlpha by transition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_alpha"
+    )
+    Box(
+        modifier = Modifier
+            .size(76.dp)
+            .graphicsLayer {
+                scaleX = ringScale
+                scaleY = ringScale
+                alpha = ringAlpha
+            }
+            .clip(CircleShape)
+            .background(color)
+    )
 }

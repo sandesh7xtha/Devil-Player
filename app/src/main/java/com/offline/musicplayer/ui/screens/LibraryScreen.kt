@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -58,7 +61,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -94,33 +97,38 @@ fun LibraryScreen(
     viewModel: MusicViewModel,
     modifier: Modifier = Modifier
 ) {
-    val hasPermission by viewModel.hasStoragePermission.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
-    val libraryLoadError by viewModel.libraryLoadError.collectAsState()
-    val playbackState by viewModel.playbackState.collectAsState()
-    val favoriteRadioStations by viewModel.favoriteRadioStations.collectAsState()
-    val radioNowPlaying by viewModel.radioNowPlaying.collectAsState()
-    val openNowPlayingRequest by viewModel.openNowPlayingRequest.collectAsState()
-    val equalizerState by viewModel.equalizerState.collectAsState()
-    val sleepTimerState by viewModel.sleepTimerState.collectAsState()
-    val smartModeState by viewModel.smartModeState.collectAsState()
-    val lyricsState by viewModel.lyricsState.collectAsState()
-    val playerFeatureSettings by viewModel.playerFeatureSettings.collectAsState()
-    val trackAudioInfo by viewModel.trackAudioInfo.collectAsState()
+    val hasPermission by viewModel.hasStoragePermission.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val libraryLoadError by viewModel.libraryLoadError.collectAsStateWithLifecycle()
+    val playbackState by viewModel.playbackState.collectAsStateWithLifecycle()
+    val favoriteRadioStations by viewModel.favoriteRadioStations.collectAsStateWithLifecycle()
+    val radioNowPlaying by viewModel.radioNowPlaying.collectAsStateWithLifecycle()
+    val openNowPlayingRequest by viewModel.openNowPlayingRequest.collectAsStateWithLifecycle()
+    val equalizerState by viewModel.equalizerState.collectAsStateWithLifecycle()
+    val sleepTimerState by viewModel.sleepTimerState.collectAsStateWithLifecycle()
+    val smartModeState by viewModel.smartModeState.collectAsStateWithLifecycle()
+    val lyricsState by viewModel.lyricsState.collectAsStateWithLifecycle()
+    val playerFeatureSettings by viewModel.playerFeatureSettings.collectAsStateWithLifecycle()
+    val trackAudioInfo by viewModel.trackAudioInfo.collectAsStateWithLifecycle()
+    val capsuleSettings by viewModel.capsuleSettings.collectAsStateWithLifecycle()
+    val setupPromptState by viewModel.setupPromptState.collectAsStateWithLifecycle()
+    // Kept as a State and read lazily so position ticks don't recompose this screen.
+    val playbackPosition = viewModel.playbackPosition.collectAsStateWithLifecycle()
+    val positionMs: () -> Long = remember(playbackPosition) { { playbackPosition.value } }
 
-    val filteredSongs by viewModel.filteredSongs.collectAsState()
-    val filteredAlbums by viewModel.filteredAlbums.collectAsState()
-    val filteredArtists by viewModel.filteredArtists.collectAsState()
+    val filteredSongs by viewModel.filteredSongs.collectAsStateWithLifecycle()
+    val filteredAlbums by viewModel.filteredAlbums.collectAsStateWithLifecycle()
+    val filteredArtists by viewModel.filteredArtists.collectAsStateWithLifecycle()
 
-    val searchQuery by viewModel.searchQuery.collectAsState()
-    val selectedTab by viewModel.selectedTab.collectAsState()
-    val selectedAlbum by viewModel.selectedAlbum.collectAsState()
-    val selectedArtist by viewModel.selectedArtist.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val selectedTab by viewModel.selectedTab.collectAsStateWithLifecycle()
+    val selectedAlbum by viewModel.selectedAlbum.collectAsStateWithLifecycle()
+    val selectedArtist by viewModel.selectedArtist.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
-    val songPendingDelete by viewModel.songPendingDelete.collectAsState()
-    val deleteToastMessage by viewModel.deleteToastMessage.collectAsState()
-    val renameToastMessage by viewModel.renameToastMessage.collectAsState()
+    val songPendingDelete by viewModel.songPendingDelete.collectAsStateWithLifecycle()
+    val deleteToastMessage by viewModel.deleteToastMessage.collectAsStateWithLifecycle()
+    val renameToastMessage by viewModel.renameToastMessage.collectAsStateWithLifecycle()
     var songToDeleteConfirm by remember { mutableStateOf<Song?>(null) }
     var songToRename by remember { mutableStateOf<Song?>(null) }
     var renameBaseName by remember { mutableStateOf("") }
@@ -128,12 +136,11 @@ fun LibraryScreen(
     val coroutineScope = rememberCoroutineScope()
     var showOverlaySetupDialog by remember { mutableStateOf(false) }
     var showBatteryGuidanceDialog by remember { mutableStateOf(false) }
-    var hasShownBatteryGuidance by remember { mutableStateOf(false) }
-    var hasPromptedOverlaySetup by remember { mutableStateOf(false) }
+    var isSettingsOpen by remember { mutableStateOf(false) }
 
     val showBatteryGuidance = {
-        if (!hasShownBatteryGuidance) {
-            hasShownBatteryGuidance = true
+        if (setupPromptState?.batteryGuidanceShown == false) {
+            viewModel.markBatteryGuidanceShown()
             showBatteryGuidanceDialog = true
         }
     }
@@ -181,7 +188,7 @@ fun LibraryScreen(
         if (!granted) {
             Toast.makeText(
                 context,
-                "Enable Devil Play notifications for Realme Mini Capsule media controls.",
+                "Notifications are off, so media controls won't appear in the shade.",
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -216,14 +223,6 @@ fun LibraryScreen(
         }
     }
 
-    val showFloatingPlayer = {
-        if (Settings.canDrawOverlays(context)) {
-            showFloatingPlayerWithNotifications()
-        } else {
-            showOverlaySetupDialog = true
-        }
-    }
-
     LaunchedEffect(deleteToastMessage) {
         deleteToastMessage?.let { msg ->
             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
@@ -245,14 +244,15 @@ fun LibraryScreen(
         }
     }
 
-    LaunchedEffect(playbackState.isPlaying, hasPermission) {
+    LaunchedEffect(playbackState.isPlaying, hasPermission, setupPromptState, capsuleSettings.enabled) {
         if (
             hasPermission &&
             playbackState.isPlaying &&
-            !hasPromptedOverlaySetup &&
+            capsuleSettings.enabled &&
+            setupPromptState?.overlaySetupPrompted == false &&
             !Settings.canDrawOverlays(context)
         ) {
-            hasPromptedOverlaySetup = true
+            viewModel.markOverlaySetupPrompted()
             showOverlaySetupDialog = true
         }
     }
@@ -273,79 +273,44 @@ fun LibraryScreen(
     }
 
     if (showOverlaySetupDialog) {
-        AlertDialog(
-            onDismissRequest = { showOverlaySetupDialog = false },
-            title = { Text("Set up the notch controller") },
-            text = {
-                Text(
-                    "Allow Display over other apps so the music pill can appear above other apps. " +
-                        "Allow notifications for Realme's native Mini Capsule. On Realme devices, " +
-                        "battery controls may also need to allow background activity. If two " +
-                        "pills appear, turn off Realme's Mini Capsule for Devil Play and keep " +
-                        "the interactive app pill; Realme UI controls its own capsule."
+        SetupStepsDialog(
+            title = "Turn on the floating capsule",
+            intro = "Control music from any app with a capsule around the camera cutout.",
+            steps = listOf(
+                "Allow Display over other apps on the next screen.",
+                "Allow notifications so media controls stay available.",
+                "If your phone also shows its own media capsule, turn that off for Devil Play."
+            ),
+            confirmLabel = "Continue",
+            dismissLabel = "Not now",
+            onConfirm = {
+                showOverlaySetupDialog = false
+                overlayPermissionLauncher.launch(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}")
+                    )
                 )
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showOverlaySetupDialog = false
-                        val permissionIntent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        overlayPermissionLauncher.launch(permissionIntent)
-                    }
-                ) {
-                    Text("Continue")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showOverlaySetupDialog = false }) {
-                    Text("Not now")
-                }
-            }
+            onDismiss = { showOverlaySetupDialog = false }
         )
     }
 
     if (showBatteryGuidanceDialog) {
-        AlertDialog(
-            onDismissRequest = { showBatteryGuidanceDialog = false },
-            title = { Text("Keep the controller running") },
-            text = {
-                Text(
-                    "If the pill disappears in the background, open Devil Play's App info and " +
-                        "set Battery usage to Allow background activity (and enable Auto launch " +
-                        "if available). Realme menu names vary. Allow media notifications in " +
-                        "Realme settings. Its Mini Capsule is separate from the app pill, so " +
-                        "disable the system capsule for Devil Play if both appear."
-                )
+        SetupStepsDialog(
+            title = "Keep the capsule running",
+            intro = "Some phones stop background apps to save battery.",
+            steps = listOf(
+                "Set Battery usage for Devil Play to Unrestricted or Allow background activity.",
+                "Enable Auto launch if your phone has it."
+            ),
+            confirmLabel = "Open battery settings",
+            dismissLabel = "Later",
+            onConfirm = {
+                showBatteryGuidanceDialog = false
+                openBatterySettings(context)
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showBatteryGuidanceDialog = false
-                        val batterySettingsIntent =
-                            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                        if (batterySettingsIntent.resolveActivity(context.packageManager) != null) {
-                            context.startActivity(batterySettingsIntent)
-                        } else {
-                            context.startActivity(
-                                Intent(
-                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                    Uri.parse("package:${context.packageName}")
-                                )
-                            )
-                        }
-                    }
-                ) {
-                    Text("Open battery settings")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showBatteryGuidanceDialog = false }) {
-                    Text("Later")
-                }
-            }
+            onDismiss = { showBatteryGuidanceDialog = false }
         )
     }
 
@@ -356,9 +321,9 @@ fun LibraryScreen(
             MiniPlayer(
                 playbackState = playbackState,
                 radioNowPlaying = radioNowPlaying,
+                positionMs = positionMs,
                 onPlayPause = { viewModel.togglePlayPause() },
                 onSkipNext = { viewModel.skipNext() },
-                onShowFloatingController = showFloatingPlayer,
                 onClick = { isNowPlayingOpen = true }
             )
         }
@@ -402,45 +367,6 @@ fun LibraryScreen(
                     }
 
                     Row {
-                        IconButton(
-                            enabled = smartModeState.isSupported,
-                            onClick = {
-                                viewModel.setSmartModeEnabled(!smartModeState.isEnabled)
-                            },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (smartModeState.isEnabled) {
-                                            AuraPrimary.copy(alpha = 0.2f)
-                                        } else {
-                                            Color.Transparent
-                                        }
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                                    contentDescription = if (smartModeState.isEnabled) {
-                                            "Turn Smart Loudness off"
-                                    } else if (smartModeState.isSupported) {
-                                            "Turn Smart Loudness on"
-                                    } else {
-                                            "Smart Loudness requires Android 9 or later"
-                                    },
-                                    tint = if (smartModeState.isEnabled) {
-                                        AuraSecondary
-                                    } else {
-                                        AuraTextSecondary
-                                    },
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
-
                         BouncingIconButton(onClick = { isEqualizerOpen = true }) {
                             Box(
                                 modifier = Modifier
@@ -491,7 +417,7 @@ fun LibraryScreen(
                             }
                         }
 
-                        BouncingIconButton(onClick = { viewModel.loadLibrary() }) {
+                        BouncingIconButton(onClick = { isSettingsOpen = true }) {
                             Box(
                                 modifier = Modifier
                                     .size(40.dp)
@@ -499,8 +425,8 @@ fun LibraryScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Refresh",
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Settings",
                                     tint = AuraTextSecondary,
                                     modifier = Modifier.size(22.dp)
                                 )
@@ -533,27 +459,27 @@ fun LibraryScreen(
                         onRenameSong = requestRenameSong
                     )
                 } else {
-                    // Standard Library View
+                    // Tabs stay pinned under the header; each tab's search sits below them
+                    // at the same spot, so switching tabs never moves the tab row.
+                    LibraryTabs(
+                        selectedTabIndex = selectedTab,
+                        onTabSelected = { viewModel.selectedTab.value = it }
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     if (selectedTab < 3) {
                         SearchBarField(
                             query = searchQuery,
                             onQueryChange = { viewModel.searchQuery.value = it },
                             onClear = { viewModel.searchQuery.value = "" }
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    LibraryTabs(
-                        selectedTabIndex = selectedTab,
-                        onTabSelected = { viewModel.selectedTab.value = it }
-                    )
-
-                    Spacer(modifier = Modifier.height(4.dp))
 
                     when (selectedTab) {
                         3 -> {
-                            val radioFeed by viewModel.radioFeed.collectAsState()
+                            val radioFeed by viewModel.radioFeed.collectAsStateWithLifecycle()
                             RadioScreen(
                                 feed = radioFeed,
                                 favoriteStations = favoriteRadioStations,
@@ -567,7 +493,7 @@ fun LibraryScreen(
                             )
                         }
                         4 -> {
-                            val jamendoFeed by viewModel.jamendoFeed.collectAsState()
+                            val jamendoFeed by viewModel.jamendoFeed.collectAsStateWithLifecycle()
                             JamendoScreen(
                                 feed = jamendoFeed,
                                 isConfigured = viewModel.isJamendoConfigured,
@@ -776,6 +702,7 @@ fun LibraryScreen(
     NowPlayingSheet(
         visible = isNowPlayingOpen,
         playbackState = playbackState,
+        positionMs = positionMs,
         sleepTimerState = sleepTimerState,
         smartModeState = smartModeState,
         lyricsState = lyricsState,
@@ -801,21 +728,45 @@ fun LibraryScreen(
         onDeleteSong = { song -> songToDeleteConfirm = song }
     )
 
+    AnimatedVisibility(
+        visible = isSettingsOpen,
+        enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+        exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut()
+    ) {
+        val settingsActions = remember(viewModel) {
+            SettingsActions(
+                onPlaybackSpeedChange = viewModel::setPlaybackSpeed,
+                onPitchLockChange = viewModel::setPitchLocked,
+                onCrossfadeSecondsChange = viewModel::setCrossfadeSeconds,
+                onSmartModeEnabledChange = viewModel::setSmartModeEnabled,
+                onOpenEqualizer = { isEqualizerOpen = true },
+                onLyricsEnabledChange = viewModel::setLyricsEnabled,
+                onLyricsFontSizeChange = viewModel::setLyricsFontSizeSp,
+                onLyricsOffsetChange = viewModel::setLyricsOffsetMs,
+                onCapsuleEnabledChange = viewModel::setCapsuleEnabled,
+                onCapsulePositionChange = viewModel::setCapsulePosition,
+                onCapsuleAnimationModeChange = viewModel::setCapsuleAnimationMode,
+                onCapsuleSwipeGesturesChange = viewModel::setCapsuleSwipeGestures,
+                onRescanLibrary = viewModel::loadLibrary,
+                onResetSettings = viewModel::resetSettings
+            )
+        }
+        SettingsScreen(
+            featureSettings = playerFeatureSettings,
+            capsuleSettings = capsuleSettings,
+            smartModeState = smartModeState,
+            equalizerState = equalizerState,
+            lyricsEnabled = lyricsState.isEnabled,
+            actions = settingsActions,
+            onBack = { isSettingsOpen = false }
+        )
+    }
+
     // Equalizer Sheet
     if (isEqualizerOpen) {
         EqualizerSheet(
             equalizerState = equalizerState,
-            smartModeState = smartModeState,
-            lyricsState = lyricsState,
-            playerFeatureSettings = playerFeatureSettings,
             onEnabledChange = { viewModel.setEqualizerEnabled(it) },
-            onSmartModeEnabledChange = { viewModel.setSmartModeEnabled(it) },
-            onLyricsEnabledChange = { viewModel.setLyricsEnabled(it) },
-            onCrossfadeSecondsChange = viewModel::setCrossfadeSeconds,
-            onPlaybackSpeedChange = viewModel::setPlaybackSpeed,
-            onPitchLockChange = viewModel::setPitchLocked,
-            onLyricsFontSizeChange = viewModel::setLyricsFontSizeSp,
-            onLyricsOffsetChange = viewModel::setLyricsOffsetMs,
             onPresetSelected = { viewModel.setEqualizerPreset(it) },
             onBandLevelChange = { index, level -> viewModel.setEqualizerBandLevel(index, level) },
             onDismiss = { isEqualizerOpen = false }
@@ -1172,4 +1123,56 @@ fun EmptyLibraryView(message: String) {
             )
         }
     }
+}
+
+@Composable
+private fun SetupStepsDialog(
+    title: String,
+    intro: String,
+    steps: List<String>,
+    confirmLabel: String,
+    dismissLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, color = AuraTextPrimary, fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text(intro, color = AuraTextSecondary, style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.height(16.dp))
+                steps.forEachIndexed { index, step ->
+                    Row(
+                        modifier = Modifier.padding(bottom = 12.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(AuraPrimary.copy(alpha = 0.25f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${index + 1}",
+                                color = AuraTextPrimary,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(step, color = AuraTextPrimary, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text(confirmLabel, color = AuraSecondary) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(dismissLabel, color = AuraTextSecondary) }
+        },
+        containerColor = AuraCard
+    )
 }

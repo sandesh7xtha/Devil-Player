@@ -14,6 +14,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.Region
 import android.graphics.Typeface
 import android.content.res.ColorStateList
 import android.graphics.drawable.GradientDrawable
@@ -36,6 +37,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
 import android.view.animation.DecelerateInterpolator
@@ -50,11 +52,15 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.offline.musicplayer.MainActivity
 import com.offline.musicplayer.R
+import com.offline.musicplayer.data.model.CapsuleAnimationMode
+import com.offline.musicplayer.data.model.CapsulePosition
+import com.offline.musicplayer.data.model.CapsuleSettings
 import com.offline.musicplayer.data.model.Song
 import com.offline.musicplayer.data.preferences.PlayerPreferences
 import java.io.IOException
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
@@ -70,13 +76,20 @@ class FloatingPlayerOverlay(
         private const val TAG = "FloatingPlayerOverlay"
         private const val ANIMATION_DURATION_MS = 240L
         private const val UNLOCK_CHECK_INTERVAL_MS = 750L
+        // ACTION_USER_PRESENT still covers later unlocks; polling is only a short fallback.
+        private const val MAX_UNLOCK_CHECKS = 40
         private const val EXPANDED_UPDATE_INTERVAL_MS = 250L
 
-        // Visible capsule height as a fraction of the camera cutout height.
-        // Lower = shorter capsule. The touch area is NOT affected by this.
-        private const val CAPSULE_HEIGHT_SCALE = 0.72f
-        private const val MIN_CAPSULE_HEIGHT_DP = 18
-        private const val CAPSULE_UPWARD_SHIFT_DP = 7
+        // Island-style capsule, roughly the proportions of a phone's camera island.
+        private const val CAPSULE_MIN_HEIGHT_DP = 32
+        private const val CAPSULE_MAX_HEIGHT_DP = 38
+        private const val CAPSULE_CAMERA_RIM_DP = 4
+        private const val CAPSULE_WAVE_SLOT_DP = 30
+        private const val CAPSULE_NO_CAMERA_GAP_DP = 36
+        private const val CAPSULE_CAMERA_GAP_DP = 4
+        // Extra touch area around the visible capsule.
+        private const val TOUCH_PAD_X_DP = 8
+        private const val TOUCH_PAD_Y_DP = 6
     }
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -107,7 +120,20 @@ class FloatingPlayerOverlay(
     private var appVisible = false
     private var screenInteractive = powerManager.isInteractive
     private var isAnimatingOut = false
+    // Display metrics come from WindowManager (an IPC on Android 11-13), so they are
+    // cached and only refreshed on configuration changes or when the overlay is shown.
+    private var displayBounds: Rect = queryDisplayBounds()
     private var cutoutBounds: Rect? = findDisplayCutout()
+    private var statusBarHeight: Int = queryStatusBarHeight()
+    private var overlayAllowed = Settings.canDrawOverlays(context)
+    private var capsuleSettings = CapsuleSettings()
+    private var unlockChecks = 0
+    private var favoritesJob: Job? = null
+    // The WindowManager the current window was added with; accessibility and app overlays
+    // must be updated and removed through the same one.
+    private var attachedWindowManager: WindowManager? = null
+    private val hostListener: () -> Unit = ::onWindowHostChanged
+    private var settingsJob: Job? = null
     private var loadedArtworkUri: Uri? = null
     private var loadedArtworkBitmap: Bitmap? = null
     private var artworkRequestId = 0
@@ -151,7 +177,9 @@ class FloatingPlayerOverlay(
             screenInteractive = powerManager.isInteractive
             if (!screenInteractive) return
             if (keyguardManager.isKeyguardLocked) {
-                handler.postDelayed(this, UNLOCK_CHECK_INTERVAL_MS)
+                if (++unlockChecks < MAX_UNLOCK_CHECKS) {
+                    handler.postDelayed(this, UNLOCK_CHECK_INTERVAL_MS)
+                }
             } else {
                 syncVisibility()
             }
@@ -186,13 +214,14 @@ class FloatingPlayerOverlay(
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     screenInteractive = true
+                    refreshOverlayPermission()
                     syncVisibility()
-                    handler.removeCallbacks(keyguardUnlockCheck)
-                    handler.postDelayed(keyguardUnlockCheck, UNLOCK_CHECK_INTERVAL_MS)
+                    scheduleUnlockCheck()
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     screenInteractive = true
                     handler.removeCallbacks(keyguardUnlockCheck)
+                    refreshOverlayPermission()
                     syncVisibility()
                 }
             }
@@ -201,7 +230,7 @@ class FloatingPlayerOverlay(
 
     private val configurationCallbacks = object : ComponentCallbacks {
         override fun onConfigurationChanged(newConfig: Configuration) {
-            cutoutBounds = findDisplayCutout()
+            refreshDisplayGeometry()
             if (root != null && newConfig.orientation == Configuration.ORIENTATION_PORTRAIT) {
                 if (isExpanded) collapse() else renderCollapsed()
             }
@@ -266,15 +295,64 @@ class FloatingPlayerOverlay(
         }
         context.registerComponentCallbacks(configurationCallbacks)
         if (screenInteractive && keyguardManager.isKeyguardLocked) {
-            handler.postDelayed(keyguardUnlockCheck, UNLOCK_CHECK_INTERVAL_MS)
+            scheduleUnlockCheck()
         }
-        serviceScope.launch {
+        favoritesJob = serviceScope.launch {
             preferences.favoriteSongIds.collect { ids ->
                 favoriteSongIds = ids
                 updateFavoriteButton()
             }
         }
+        settingsJob = serviceScope.launch {
+            preferences.capsuleSettings.collect(::applyCapsuleSettings)
+        }
+        CapsuleWindowHost.addListener(hostListener)
     }
+
+    /** Re-adds the window in the right layer when accessibility access changes. */
+    private fun onWindowHostChanged() {
+        val hostManager = CapsuleWindowHost.windowManager
+        if (root != null && attachedWindowManager !== (hostManager ?: windowManager)) {
+            removeOverlay()
+        }
+        syncVisibility()
+    }
+
+    private fun applyCapsuleSettings(settings: CapsuleSettings) {
+        val previous = capsuleSettings
+        capsuleSettings = settings
+        if (previous.enabled != settings.enabled) {
+            if (settings.enabled) dismissedByUser = false
+            syncVisibility()
+        }
+        if (previous.position != settings.position && root != null) {
+            // The window moves, so rebuild it at the new place.
+            removeOverlay()
+            syncVisibility()
+        } else if (previous.animationMode != settings.animationMode && root != null && !isExpanded) {
+            renderCollapsed()
+        }
+    }
+
+    private fun scheduleUnlockCheck() {
+        unlockChecks = 0
+        handler.removeCallbacks(keyguardUnlockCheck)
+        handler.postDelayed(keyguardUnlockCheck, UNLOCK_CHECK_INTERVAL_MS)
+    }
+
+    private fun refreshOverlayPermission() {
+        overlayAllowed = Settings.canDrawOverlays(context)
+    }
+
+    private fun refreshDisplayGeometry() {
+        displayBounds = queryDisplayBounds()
+        cutoutBounds = findDisplayCutout()
+        statusBarHeight = queryStatusBarHeight()
+    }
+
+    /** The camera to wrap around, or null when the capsule sits below the status bar. */
+    private val cameraAnchor: Rect?
+        get() = cutoutBounds.takeIf { capsuleSettings.position == CapsulePosition.AROUND_CAMERA }
 
     fun updatePlayer(newPlayer: ExoPlayer) {
         if (player === newPlayer) return
@@ -288,12 +366,15 @@ class FloatingPlayerOverlay(
 
     fun show(): Boolean {
         dismissedByUser = false
+        refreshOverlayPermission()
         syncVisibility()
-        return Settings.canDrawOverlays(context)
+        return overlayAllowed
     }
 
     fun setAppVisible(visible: Boolean) {
         appVisible = visible
+        // Leaving the app is when the user may have changed the overlay permission.
+        if (!visible) refreshOverlayPermission()
         syncVisibility()
     }
 
@@ -303,7 +384,10 @@ class FloatingPlayerOverlay(
             player.playbackState != Player.STATE_ENDED
         val isLandscape =
             context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        val shouldShow = Settings.canDrawOverlays(context) &&
+        val canDraw = overlayAllowed || CapsuleWindowHost.windowManager != null
+        val shouldShow = canDraw &&
+            capsuleSettings.enabled &&
+            !CapsuleWindowHost.shadeOpen &&
             !appVisible &&
             screenInteractive &&
             !keyguardManager.isKeyguardLocked &&
@@ -321,19 +405,31 @@ class FloatingPlayerOverlay(
     }
 
     private fun showOverlay(): Boolean {
-        if (root != null) {
-            root?.animate()?.cancel()
-            root?.apply {
-                alpha = 1f
-                scaleX = 1f
-                scaleY = 1f
+        val existing = root
+        if (existing != null) {
+            // Only interrupt a fade-out; cancelling the fade-in on every player event snaps it.
+            if (isAnimatingOut) {
+                existing.animate().cancel()
+                existing.alpha = 1f
+                existing.scaleX = 1f
+                existing.scaleY = 1f
+                isAnimatingOut = false
+                isTransitioning = false
             }
-            isAnimatingOut = false
             handler.removeCallbacks(updater)
             handler.post(updater)
             return true
         }
-        if (!Settings.canDrawOverlays(context)) return false
+        // Accessibility overlays sit above the status bar; app overlays sit below it.
+        val hostManager = CapsuleWindowHost.windowManager
+        val targetManager = hostManager ?: windowManager
+        val windowType = if (hostManager != null) {
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        }
+        if (hostManager == null && !overlayAllowed) return false
+        refreshDisplayGeometry()
 
         val view = object : FrameLayout(context) {
             // Without this, Android waits ~100ms before showing pressed state / ripple.
@@ -347,7 +443,7 @@ class FloatingPlayerOverlay(
         val params = WindowManager.LayoutParams(
             pillTouchWidth(),
             pillTouchHeight(),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -377,7 +473,8 @@ class FloatingPlayerOverlay(
         }
 
         return try {
-            windowManager.addView(view, params)
+            targetManager.addView(view, params)
+            attachedWindowManager = targetManager
             view.alpha = 0f
             view.scaleX = 0.82f
             view.scaleY = 0.82f
@@ -404,6 +501,12 @@ class FloatingPlayerOverlay(
             true
         } catch (e: SecurityException) {
             Log.e(TAG, "Overlay permission was revoked before the player could be shown.", e)
+            overlayAllowed = false
+            root = null
+            windowParams = null
+            false
+        } catch (e: WindowManager.BadTokenException) {
+            Log.e(TAG, "Accessibility service went away before the capsule could be shown.", e)
             root = null
             windowParams = null
             false
@@ -442,12 +545,17 @@ class FloatingPlayerOverlay(
         favoriteButtonView = null
         favoriteSongId = null
         seekBar = null
+        // The decoded artwork is kept so the next show doesn't decode it again.
         clearRenderedViews()
-        loadedArtworkUri = null
-        loadedArtworkBitmap = null
-        artworkRequestId++
+        val manager = attachedWindowManager
+        attachedWindowManager = null
         if (attachedView?.isAttachedToWindow == true) {
-            windowManager.removeView(attachedView)
+            try {
+                manager?.removeView(attachedView)
+            } catch (e: IllegalArgumentException) {
+                // The accessibility service disconnected and took its window with it.
+                Log.w(TAG, "Capsule window was already removed.", e)
+            }
         }
     }
 
@@ -472,8 +580,13 @@ class FloatingPlayerOverlay(
     }
 
     fun release() {
+        CapsuleWindowHost.removeListener(hostListener)
         handler.removeCallbacks(keyguardUnlockCheck)
+        favoritesJob?.cancel()
+        settingsJob?.cancel()
         removeOverlay()
+        loadedArtworkUri = null
+        loadedArtworkBitmap = null
         player.removeListener(playerListener)
         context.unregisterReceiver(screenStateReceiver)
         context.unregisterComponentCallbacks(configurationCallbacks)
@@ -665,7 +778,6 @@ class FloatingPlayerOverlay(
             background = capsuleBackground()
             setPadding(0, 0, 0, 0)
             clipToPadding = false
-            translationY = -dp(CAPSULE_UPWARD_SHIFT_DP).toFloat()
             elevation = dp(10).toFloat()
             isClickable = true
             isFocusable = true
@@ -675,11 +787,17 @@ class FloatingPlayerOverlay(
             }
         }
 
-        val tapTargetSize = dp(32)
-        val touchHeight = pillTouchHeight()
-        val visibleHeight = capsuleVisibleHeight()
-        val artSize = min(dp(16), visibleHeight - dp(4))
-        val waveformHeight = min(dp(16), visibleHeight - dp(6))
+        // Positions are relative to the collapsed window (the touch area).
+        val layout = capsuleLayout()
+        val touchLeft = pillTouchLeft()
+        val visibleTop = layout.top - pillTouchTop()
+        val visibleHeight = layout.height
+        val artSlot = visibleHeight
+        val artSize = visibleHeight - dp(10)
+        val waveSlot = dp(CAPSULE_WAVE_SLOT_DP)
+        val artLeft = layout.artLeft - touchLeft
+        val waveLeft = layout.waveLeft - touchLeft
+
         val image = ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             background = circleBackground(0xFF282828.toInt())
@@ -687,73 +805,54 @@ class FloatingPlayerOverlay(
             setImageResource(R.drawable.ic_launcher_foreground)
             isClickable = false
         }
-        val artworkTarget = FrameLayout(context).apply {
-            background = capsuleTargetRipple(tapTargetSize)
-            setPadding(0, 0, 0, 0)
-            clipToPadding = false
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Expand floating music controls"
-            setOnClickListener {
-                if (isExpanded) collapse() else expand()
-            }
-            addView(
-                image,
-                FrameLayout.LayoutParams(artSize, artSize, Gravity.CENTER)
-            )
-        }
         collapsedArtworkView = image
         updateArtworkRotation()
         artworkViews.add(image)
-        val cameraLeft = cutoutBounds?.left?.minus(pillTouchLeft())
-            ?: (pillTouchWidth() / 2 - dp(6))
-        val cameraRight = cutoutBounds?.right?.minus(pillTouchLeft())
-            ?: (pillTouchWidth() / 2 + dp(6))
-        val artLeft = cameraLeft - tapTargetSize - dp(1)
         pill.addView(
-            artworkTarget,
-            FrameLayout.LayoutParams(tapTargetSize, touchHeight).apply {
+            capsuleTarget(image, artSize, artSize, artSlot, visibleHeight),
+            FrameLayout.LayoutParams(artSlot, visibleHeight).apply {
                 gravity = Gravity.TOP or Gravity.START
-                leftMargin = artLeft.coerceIn(
-                    dp(1),
-                    max(dp(1), pillTouchWidth() - tapTargetSize - dp(1))
-                )
-                topMargin = 0
+                leftMargin = artLeft
+                topMargin = visibleTop
             }
         )
 
         val waveform = AudioWaveformView(context).apply {
+            frameIntervalMs = when (capsuleSettings.animationMode) {
+                CapsuleAnimationMode.FULL -> 42L
+                CapsuleAnimationMode.REDUCED -> 120L
+                CapsuleAnimationMode.OFF -> 0L
+            }
             isPlaying = player.isPlaying
         }
-        val waveformTarget = FrameLayout(context).apply {
-            background = capsuleTargetRipple(tapTargetSize)
-            setPadding(0, 0, 0, 0)
-            clipToPadding = false
-            isClickable = true
-            isFocusable = true
-            contentDescription = "Expand floating music controls"
-            setOnClickListener {
-                if (isExpanded) collapse() else expand()
-            }
-            addView(
-                waveform,
-                FrameLayout.LayoutParams(dp(14), waveformHeight, Gravity.CENTER)
-            )
-        }
         waveformViews.add(waveform)
-        val waveformLeft = cameraRight + dp(1)
         pill.addView(
-            waveformTarget,
-            FrameLayout.LayoutParams(tapTargetSize, touchHeight).apply {
+            capsuleTarget(waveform, dp(18), visibleHeight - dp(16), waveSlot, visibleHeight),
+            FrameLayout.LayoutParams(waveSlot, visibleHeight).apply {
                 gravity = Gravity.TOP or Gravity.START
-                leftMargin = waveformLeft.coerceIn(
-                    dp(1),
-                    max(dp(1), pillTouchWidth() - tapTargetSize - dp(1))
-                )
-                topMargin = 0
+                leftMargin = waveLeft
+                topMargin = visibleTop
             }
         )
         return pill
+    }
+
+    /** A circular tap target inside the capsule that expands the card. */
+    private fun capsuleTarget(
+        content: View,
+        contentWidth: Int,
+        contentHeight: Int,
+        width: Int,
+        height: Int
+    ) = FrameLayout(context).apply {
+        background = capsuleTargetRipple(width, height)
+        isClickable = true
+        isFocusable = true
+        contentDescription = "Expand floating music controls"
+        setOnClickListener {
+            if (isExpanded) collapse() else expand()
+        }
+        addView(content, FrameLayout.LayoutParams(contentWidth, contentHeight, Gravity.CENTER))
     }
 
     private fun buildExpandedCard(): ExpandedViews {
@@ -1047,10 +1146,11 @@ class FloatingPlayerOverlay(
     ) {
         if (!view.isAttachedToWindow) return
         try {
-            windowManager.updateViewLayout(view, params)
+            attachedWindowManager?.updateViewLayout(view, params)
         } catch (e: SecurityException) {
             Log.e(TAG, "Overlay permission was revoked while updating the player.", e)
-            hide()
+            overlayAllowed = false
+            removeOverlay()
         }
     }
 
@@ -1150,11 +1250,7 @@ class FloatingPlayerOverlay(
     }
 
     private fun applyWindowCutout(rectangles: List<Rect>) {
-        val displayHeight = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            windowManager.currentWindowMetrics.bounds.height()
-        } else {
-            context.resources.displayMetrics.heightPixels
-        }
+        val displayHeight = displayBounds.height()
         val candidate = rectangles
             .filter { it.width() > 0 && it.height() > 0 && it.top < dp(140) }
             .maxByOrNull { it.width().toLong() * it.height() }
@@ -1170,6 +1266,24 @@ class FloatingPlayerOverlay(
         } else collapse()
     }
 
+    private fun queryStatusBarHeight(): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val insets = windowManager.currentWindowMetrics.windowInsets
+                .getInsetsIgnoringVisibility(WindowInsets.Type.statusBars())
+            if (insets.top > 0) return insets.top
+        }
+        val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (resourceId > 0) context.resources.getDimensionPixelSize(resourceId) else dp(24)
+    }
+
+    private fun queryDisplayBounds(): Rect =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Rect(windowManager.currentWindowMetrics.bounds)
+        } else {
+            val metrics = context.resources.displayMetrics
+            Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
+        }
+
     private fun findDisplayCutout(): Rect? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
         val cutout = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1177,53 +1291,121 @@ class FloatingPlayerOverlay(
         } else {
             root?.rootWindowInsets?.displayCutout
         }
-        return cutout?.boundingRects
+        val box = cutout?.boundingRects
             ?.filter { it.width() > 0 && it.height() > 0 && it.top < dp(140) }
             ?.maxByOrNull { it.width().toLong() * it.height() }
-            ?.let { Rect(it) }
-    }
-
-    private fun displayWidth(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            windowManager.currentWindowMetrics.bounds.width()
-        } else {
-            context.resources.displayMetrics.widthPixels
+            ?: return null
+        // Bounding boxes can be padded well past the lens; the outline is the real hole.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val outline = cutout.cutoutPath
+            if (outline != null) {
+                val hole = Region().apply { setPath(outline, Region(box)) }.bounds
+                if (!hole.isEmpty) return hole
+            }
         }
-
-    private fun pillWidth(): Int {
-        val cameraWidth = cutoutBounds?.width()?.coerceAtLeast(dp(12)) ?: dp(12)
-        return min(displayWidth() - dp(16), cameraWidth + dp(64))
+        return Rect(box)
     }
 
-    private fun pillHeight(): Int =
-        max(dp(26), (cutoutBounds?.height() ?: 0) + dp(4))
+    private fun displayWidth(): Int = displayBounds.width()
 
-    private fun pillTouchWidth(): Int =
-        min(displayWidth(), pillWidth() + dp(16))
-
-    private fun pillTouchHeight(): Int = pillHeight() + dp(12)
-
-    private fun pillTouchLeft(): Int =
-        (pillLeft() - dp(8)).coerceIn(0, max(0, displayWidth() - pillTouchWidth()))
-
-    private fun pillTouchTop(): Int =
-        cutoutBounds?.top?.minus(dp(6))?.coerceAtLeast(0)
-            ?: max(0, pillTop() - dp(6))
+    /** Visible capsule bounds and item positions, all in screen coordinates. */
+    private class CapsuleLayout(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+        val artLeft: Int,
+        val waveLeft: Int
+    )
 
     /**
-     * Height of the black capsule that is actually drawn. Restored to the original slim height.
+     * Sized to its content: artwork, camera and level bars. A centred camera sits in the
+     * middle like an island; a corner camera sits at the capsule's end, with both items
+     * beside it, so no width is wasted.
      */
-    private fun capsuleVisibleHeight(): Int {
-        val cutoutHeight = cutoutBounds?.height() ?: 0
-        val target = (max(dp(26), cutoutHeight) * CAPSULE_HEIGHT_SCALE).toInt()
-        return target.coerceIn(dp(MIN_CAPSULE_HEIGHT_DP), pillHeight())
+    private fun capsuleLayout(): CapsuleLayout {
+        val screenWidth = displayWidth()
+        val edge = dp(8)
+        val gap = dp(CAPSULE_CAMERA_GAP_DP)
+        val camera = cameraAnchor
+        val height = ((camera?.height() ?: 0) + dp(CAPSULE_CAMERA_RIM_DP) * 2)
+            .coerceIn(dp(CAPSULE_MIN_HEIGHT_DP), dp(CAPSULE_MAX_HEIGHT_DP))
+        val artSlot = height
+        val waveSlot = dp(CAPSULE_WAVE_SLOT_DP)
+        val top = camera?.let { (it.centerY() - height / 2).coerceAtLeast(dp(2)) }
+            ?: (statusBarHeight + dp(6))
+
+        fun clampLeft(left: Int, width: Int) =
+            left.coerceIn(edge, max(edge, screenWidth - edge - width))
+
+        if (camera == null) {
+            val width = artSlot + dp(CAPSULE_NO_CAMERA_GAP_DP) + waveSlot
+            val left = clampLeft(screenWidth / 2 - width / 2, width)
+            return CapsuleLayout(left, top, width, height, left, left + width - waveSlot)
+        }
+
+        // Rim beside a corner camera matches the rim above and below it.
+        val sideRim = ((height - camera.height()) / 2).coerceAtLeast(dp(4))
+        val wing = max(artSlot, waveSlot)
+        val centredWidth = camera.width() + gap * 2 + wing * 2
+        val centredLeft = camera.centerX() - centredWidth / 2
+        val besideWidth = sideRim + camera.width() + gap + artSlot + waveSlot
+
+        return when {
+            centredLeft >= edge && centredLeft + centredWidth <= screenWidth - edge -> {
+                val left = centredLeft
+                CapsuleLayout(
+                    left, top, centredWidth, height,
+                    artLeft = left + (wing - artSlot) / 2,
+                    waveLeft = left + centredWidth - wing + (wing - waveSlot) / 2
+                )
+            }
+            camera.centerX() < screenWidth / 2 -> {
+                val left = clampLeft(camera.left - sideRim, besideWidth)
+                CapsuleLayout(
+                    left, top, besideWidth, height,
+                    artLeft = camera.right + gap,
+                    waveLeft = camera.right + gap + artSlot
+                )
+            }
+            else -> {
+                val right = min(screenWidth - edge, camera.right + sideRim)
+                val left = clampLeft(right - besideWidth, besideWidth)
+                CapsuleLayout(
+                    left, top, besideWidth, height,
+                    artLeft = left,
+                    waveLeft = left + artSlot
+                )
+            }
+        }
     }
 
+    private fun capsuleVisibleHeight(): Int = capsuleLayout().height
+
+    private fun capsuleVisibleWidth(): Int = capsuleLayout().width
+
+    private fun capsuleVisibleLeft(): Int = capsuleLayout().left
+
+    private fun capsuleVisibleTop(): Int = capsuleLayout().top
+
+    private fun pillTouchLeft(): Int = max(0, capsuleVisibleLeft() - dp(TOUCH_PAD_X_DP))
+
+    private fun pillTouchTop(): Int = max(0, capsuleVisibleTop() - dp(TOUCH_PAD_Y_DP))
+
+    private fun pillTouchWidth(): Int =
+        min(
+            displayWidth() - pillTouchLeft(),
+            capsuleVisibleLeft() + capsuleVisibleWidth() + dp(TOUCH_PAD_X_DP) - pillTouchLeft()
+        )
+
+    private fun pillTouchHeight(): Int =
+        capsuleVisibleTop() + capsuleVisibleHeight() + dp(TOUCH_PAD_Y_DP) - pillTouchTop()
+
     /** Circular ripple sized to the visible capsule so it never spills outside it. */
-    private fun capsuleTargetRipple(targetWidth: Int): Drawable {
-        val diameter = (capsuleVisibleHeight() - dp(2)).coerceAtLeast(dp(12))
+    private fun capsuleTargetRipple(targetWidth: Int, targetHeight: Int): Drawable {
+        val diameter = (targetHeight - dp(4)).coerceAtLeast(dp(12))
         val insetX = ((targetWidth - diameter) / 2).coerceAtLeast(0)
-        val insetY = ((pillTouchHeight() - diameter) / 2).coerceAtLeast(0)
+        val insetY = ((targetHeight - diameter) / 2).coerceAtLeast(0)
         return InsetDrawable(
             rippleOnly(circleBackground(0xFFFFFFFF.toInt()), 0x45FFFFFF),
             insetX,
@@ -1233,19 +1415,10 @@ class FloatingPlayerOverlay(
         )
     }
 
-    private fun pillLeft(): Int =
-        (cutoutBounds?.centerX() ?: displayWidth() / 2)
-            .minus(pillWidth() / 2)
-            .coerceIn(0, max(0, displayWidth() - pillWidth()))
-
-    private fun pillTop(): Int =
-        max(0, (cutoutBounds?.top ?: dp(8)) - dp(5))
-
     private fun expandedWidth(): Int = displayWidth() - dp(24)
 
     private fun expandedCardTop(): Int =
-        (pillTouchHeight() - capsuleVisibleHeight()) / 2 +
-            capsuleVisibleHeight() + dp(8)
+        capsuleVisibleTop() - pillTouchTop() + capsuleVisibleHeight() + dp(8)
 
     private fun expandedHeight(): Int = expandedCardTop() + dp(196)
 
@@ -1259,6 +1432,12 @@ class FloatingPlayerOverlay(
 
     private fun updateArtworkRotation() {
         val artwork = collapsedArtworkView ?: return
+        if (capsuleSettings.animationMode != CapsuleAnimationMode.FULL) {
+            artworkRotationAnimator?.cancel()
+            artworkRotationAnimator = null
+            artwork.rotation = 0f
+            return
+        }
         if (!player.isPlaying) {
             artworkRotationAnimator?.pause()
             return
@@ -1352,6 +1531,7 @@ class FloatingPlayerOverlay(
         private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
+        private val trianglePath = android.graphics.Path()
 
         var isPlaying: Boolean = false
             set(value) {
@@ -1467,13 +1647,12 @@ class FloatingPlayerOverlay(
             baseBottomX: Float,
             baseBottomY: Float
         ) {
-            val path = android.graphics.Path().apply {
-                moveTo(tipX, tipY)
-                lineTo(baseTopX, baseTopY)
-                lineTo(baseBottomX, baseBottomY)
-                close()
-            }
-            canvas.drawPath(path, iconPaint)
+            trianglePath.rewind()
+            trianglePath.moveTo(tipX, tipY)
+            trianglePath.lineTo(baseTopX, baseTopY)
+            trianglePath.lineTo(baseBottomX, baseBottomY)
+            trianglePath.close()
+            canvas.drawPath(trianglePath, iconPaint)
         }
     }
 
@@ -1510,6 +1689,7 @@ class FloatingPlayerOverlay(
         }
 
         private fun isHorizontalSwipe(event: MotionEvent): Boolean {
+            if (!capsuleSettings.swipeGestures) return false
             val dx = event.x - downX
             val dy = event.y - downY
             return abs(dx) > swipeThreshold && abs(dx) > abs(dy) * 1.35f
@@ -1636,16 +1816,17 @@ class FloatingPlayerOverlay(
 
     private fun pillBackground() = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(40).toFloat()
+        cornerRadius = capsuleVisibleHeight() / 2f
         setColor(0xFF000000.toInt())
-        setStroke(dp(1), 0xFF242424.toInt())
     }
 
     private fun capsuleBackground(): Drawable {
-        val visibleHeight = capsuleVisibleHeight()
-        val verticalInset = ((pillTouchHeight() - visibleHeight) / 2).coerceAtLeast(0)
+        val left = capsuleVisibleLeft() - pillTouchLeft()
+        val top = capsuleVisibleTop() - pillTouchTop()
+        val right = pillTouchWidth() - left - capsuleVisibleWidth()
+        val bottom = pillTouchHeight() - top - capsuleVisibleHeight()
         val pill = rippleBackground(pillBackground(), 0x35FFFFFF)
-        return InsetDrawable(pill, dp(8), verticalInset, dp(8), verticalInset)
+        return InsetDrawable(pill, left, top, max(0, right), max(0, bottom))
     }
 
     private fun cardBackground() = GradientDrawable().apply {
@@ -1685,16 +1866,52 @@ class FloatingPlayerOverlay(
         waveformViews.clear()
     }
 
+    /**
+     * Small animated level bars. A single self-rescheduling tick drives redraws, so repeated
+     * state updates can never stack extra redraw loops; frameIntervalMs = 0 draws it static.
+     */
     private class AudioWaveformView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF75D9C6.toInt()
             style = Paint.Style.FILL
         }
+        private val minBarHeight = 3 * context.resources.displayMetrics.density
+        private val tick = Runnable {
+            invalidate()
+            scheduleTick()
+        }
+
+        var frameIntervalMs: Long = 42L
+            set(value) {
+                if (field == value) return
+                field = value
+                scheduleTick()
+            }
+
         var isPlaying: Boolean = false
             set(value) {
+                if (field == value) return
                 field = value
                 invalidate()
+                scheduleTick()
             }
+
+        private fun scheduleTick() {
+            removeCallbacks(tick)
+            if (isPlaying && frameIntervalMs > 0L && isAttachedToWindow) {
+                postDelayed(tick, frameIntervalMs)
+            }
+        }
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            scheduleTick()
+        }
+
+        override fun onDetachedFromWindow() {
+            removeCallbacks(tick)
+            super.onDetachedFromWindow()
+        }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
@@ -1702,14 +1919,15 @@ class FloatingPlayerOverlay(
             val barWidth = width / (barCount * 2f)
             val gap = barWidth
             val centerY = height / 2f
+            val animate = isPlaying && frameIntervalMs > 0L
             val phase = SystemClock.uptimeMillis() / 110f
             for (index in 0 until barCount) {
-                val wave = if (isPlaying) {
-                    (0.25f + 0.75f * kotlin.math.abs(kotlin.math.sin(phase + index * 0.9f)))
-                } else {
-                    0.25f + index * 0.04f
+                val wave = when {
+                    animate -> 0.25f + 0.75f * abs(kotlin.math.sin(phase + index * 0.9f))
+                    isPlaying -> 0.55f + (index % 2) * 0.25f
+                    else -> 0.25f + index * 0.04f
                 }
-                val barHeight = (height * wave).coerceAtLeast(dp(context, 3).toFloat())
+                val barHeight = (height * wave).coerceAtLeast(minBarHeight)
                 val left = index * (barWidth + gap)
                 canvas.drawRoundRect(
                     left,
@@ -1721,10 +1939,6 @@ class FloatingPlayerOverlay(
                     paint
                 )
             }
-            if (isPlaying) postInvalidateDelayed(33L)
         }
-
-        private fun dp(context: Context, value: Int): Int =
-            (value * context.resources.displayMetrics.density).toInt()
     }
 }

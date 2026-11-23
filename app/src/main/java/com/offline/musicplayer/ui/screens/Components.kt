@@ -126,16 +126,20 @@ fun AudioWaveformVisualizer(
     barCount: Int = 22,
     modifier: Modifier = Modifier.height(36.dp).fillMaxWidth()
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "waveform_anim")
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 6.28318f, // 2 * PI
-        animationSpec = infiniteRepeatable(
-            animation = tween(1400, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "phase"
-    )
+    // No frame clock work while paused: the transition only exists while playing.
+    val phaseState = if (isPlaying) {
+        rememberInfiniteTransition(label = "waveform_anim").animateFloat(
+            initialValue = 0f,
+            targetValue = 6.28318f, // 2 * PI
+            animationSpec = infiniteRepeatable(
+                animation = tween(1400, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "phase"
+        )
+    } else {
+        null
+    }
 
     Canvas(modifier = modifier) {
         val totalWidth = size.width
@@ -149,6 +153,7 @@ fun AudioWaveformVisualizer(
             endY = maxHeight
         )
 
+        val phase = phaseState?.value ?: 0f
         for (i in 0 until barCount) {
             val harmonic1 = sin(phase + i * 0.45f)
             val harmonic2 = sin(phase * 1.5f + i * 0.85f)
@@ -183,37 +188,44 @@ fun PlayingEqualizerIndicator(
     modifier: Modifier = Modifier.size(width = 16.dp, height = 14.dp),
     color: Color = AuraSecondary
 ) {
+    if (!isPlaying) {
+        EqualizerBars(modifier, color) { listOf(0.3f, 0.5f, 0.3f) }
+        return
+    }
     val infiniteTransition = rememberInfiniteTransition(label = "mini_eq")
-
-    val h1 by infiniteTransition.animateFloat(
+    val h1 = infiniteTransition.animateFloat(
         initialValue = 0.2f,
         targetValue = 0.9f,
         animationSpec = infiniteRepeatable(tween(380, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "h1"
     )
-    val h2 by infiniteTransition.animateFloat(
+    val h2 = infiniteTransition.animateFloat(
         initialValue = 0.8f,
         targetValue = 0.3f,
         animationSpec = infiniteRepeatable(tween(480, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "h2"
     )
-    val h3 by infiniteTransition.animateFloat(
+    val h3 = infiniteTransition.animateFloat(
         initialValue = 0.4f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(tween(340, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "h3"
     )
+    EqualizerBars(modifier, color) { listOf(h1.value, h2.value, h3.value) }
+}
 
+@Composable
+private fun EqualizerBars(modifier: Modifier, color: Color, heights: () -> List<Float>) {
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
         val barW = 3.dp.toPx()
         val gap = (w - 3 * barW) / 2f
 
-        val heights = if (isPlaying) listOf(h1, h2, h3) else listOf(0.3f, 0.5f, 0.3f)
+        val barHeights = heights()
 
         for (i in 0..2) {
-            val barH = h * heights[i]
+            val barH = h * barHeights[i]
             val left = i * (barW + gap)
             val top = h - barH
             drawRoundRect(
@@ -521,7 +533,8 @@ fun SearchBarField(
     query: String,
     onQueryChange: (String) -> Unit,
     onClear: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    placeholder: String = "Search songs, artists, albums…"
 ) {
     OutlinedTextField(
         value = query,
@@ -531,7 +544,7 @@ fun SearchBarField(
             .padding(horizontal = 16.dp),
         placeholder = {
             Text(
-                text = "Search songs, artists, albums…",
+                text = placeholder,
                 color = AuraTextTertiary,
                 fontSize = 14.sp
             )
