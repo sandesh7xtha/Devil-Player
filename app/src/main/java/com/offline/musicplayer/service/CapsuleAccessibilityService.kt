@@ -3,6 +3,8 @@ package com.offline.musicplayer.service
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.Rect
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 
@@ -13,7 +15,13 @@ import android.view.accessibility.AccessibilityWindowInfo
  */
 class CapsuleAccessibilityService : AccessibilityService() {
 
+    private companion object {
+        const val SHADE_CHECK_DELAY_MS = 60L
+    }
+
     private val bounds = Rect()
+    private val handler = Handler(Looper.getMainLooper())
+    private val shadeCheck = Runnable { updateShadeState() }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -24,7 +32,11 @@ class CapsuleAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         when (event?.eventType) {
             AccessibilityEvent.TYPE_WINDOWS_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> updateShadeState()
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                // Coalesce bursts (e.g. the capsule's own window changing) into one query.
+                handler.removeCallbacks(shadeCheck)
+                handler.postDelayed(shadeCheck, SHADE_CHECK_DELAY_MS)
+            }
         }
     }
 
@@ -36,6 +48,7 @@ class CapsuleAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(shadeCheck)
         CapsuleWindowHost.detach(this)
         super.onDestroy()
     }
