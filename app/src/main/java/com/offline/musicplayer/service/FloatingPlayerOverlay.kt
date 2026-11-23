@@ -75,6 +75,10 @@ class FloatingPlayerOverlay(
     companion object {
         private const val TAG = "FloatingPlayerOverlay"
         private const val ANIMATION_DURATION_MS = 240L
+        private const val EXPAND_DURATION_MS = 280L
+        private const val COLLAPSE_DURATION_MS = 220L
+        // Height the card starts from (as a fraction) when it grows out of the capsule.
+        private const val MORPH_START_SCALE_Y = 0.35f
         private const val UNLOCK_CHECK_INTERVAL_MS = 750L
         // ACTION_USER_PRESENT still covers later unlocks; polling is only a short fallback.
         private const val MAX_UNLOCK_CHECKS = 40
@@ -139,7 +143,6 @@ class FloatingPlayerOverlay(
     private var artworkRequestId = 0
     private val artworkViews = mutableListOf<ImageView>()
     private val waveformViews = mutableListOf<AudioWaveformView>()
-    private var windowAnimator: ValueAnimator? = null
     private var collapsedArtworkView: ImageView? = null
     private var artworkRotationAnimator: ObjectAnimator? = null
     private var favoriteButtonView: TextView? = null
@@ -147,6 +150,13 @@ class FloatingPlayerOverlay(
     private var favoriteSongIds: Set<String> = emptySet()
 
     private val transitionInterpolator = PathInterpolator(0.4f, 0f, 0.2f, 1f)
+    // Material "emphasized" curves: quick start that settles gently, and its reverse.
+    private val enterInterpolator = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
+    private val exitInterpolator = PathInterpolator(0.3f, 0f, 0.8f, 0.15f)
+    // A tap that arrives mid-transition runs once the transition ends instead of being lost.
+    private var pendingToggle = false
+    // Width of the capsule relative to the card; the card's starting horizontal scale.
+    private var morphStartScaleX = 0.4f
 
     // The expanded card is built once, ahead of time, so tapping the capsule
     // doesn't have to create ~30 views on the main thread at that moment.
@@ -198,7 +208,6 @@ class FloatingPlayerOverlay(
         } else {
             rippleOnly(circleBackground(0xFFFFFFFF.toInt()), 0x35FFFFFF)
         }
-        attachPressFeedback(this)
         setOnClickListener {
             action()
         }
@@ -523,8 +532,7 @@ class FloatingPlayerOverlay(
         handler.removeCallbacks(prebuildPanel)
         preparedPanel = null
         activePanel = null
-        windowAnimator?.cancel()
-        windowAnimator = null
+        pendingToggle = false
         artworkRotationAnimator?.cancel()
         artworkRotationAnimator = null
         expandedCard?.animate()?.cancel()
@@ -564,9 +572,8 @@ class FloatingPlayerOverlay(
         if (isAnimatingOut) return
         isAnimatingOut = true
         isTransitioning = true
+        pendingToggle = false
         handler.removeCallbacks(updater)
-        windowAnimator?.cancel()
-        windowAnimator = null
         view.animate()
             .alpha(0f)
             .scaleX(0.82f)
@@ -626,6 +633,45 @@ class FloatingPlayerOverlay(
         updatePlaybackState()
     }
 
+    private fun toggleExpanded() {
+        if (isTransitioning) {
+            pendingToggle = !pendingToggle
+            return
+        }
+        if (isExpanded) collapse() else expand()
+    }
+
+    private fun requestCollapse() {
+        when {
+            isCollapsing -> Unit
+            isTransitioning -> pendingToggle = true
+            isExpanded -> collapse()
+        }
+    }
+
+    private fun endTransition() {
+        isTransitioning = false
+        if (pendingToggle) {
+            pendingToggle = false
+            handler.post { if (root != null) toggleExpanded() }
+        }
+    }
+
+    /**
+     * Scales the card around the capsule's centre so it appears to grow out of, and shrink
+     * back into, the capsule. Only RenderNode properties animate, so it runs on the
+     * RenderThread at full frame rate with no layout or window work per frame.
+     */
+    private fun applyMorphPivot(panel: View, windowX: Int) {
+        val panelLeft = windowX + dp(12)
+        val panelWidth = expandedWidth() - dp(24)
+        panel.pivotX = (capsuleVisibleLeft() + capsuleVisibleWidth() / 2 - panelLeft).toFloat()
+        panel.pivotY = (
+            capsuleVisibleTop() - pillTouchTop() + capsuleVisibleHeight() / 2 - expandedCardTop()
+            ).toFloat()
+        morphStartScaleX = capsuleVisibleWidth().toFloat() / panelWidth
+    }
+
     private fun expand() {
         val container = root ?: return
         if (isExpanded || isCollapsing || isTransitioning) return
@@ -640,10 +686,11 @@ class FloatingPlayerOverlay(
         clearRenderedViews()
         attachExpandedViews(views)
         val panel = views.panel
+        applyMorphPivot(panel, toX)
         panel.alpha = 0f
-        panel.translationY = -dp(6).toFloat()
-        panel.scaleX = 0.97f
-        panel.scaleY = 0.97f
+        panel.translationY = 0f
+        panel.scaleX = morphStartScaleX
+        panel.scaleY = MORPH_START_SCALE_Y
 
         isExpanded = true
         expandedCard = panel
@@ -660,14 +707,15 @@ class FloatingPlayerOverlay(
         )
         configureOutsideTap(container)
         setWatchOutsideTouch(true)
+        // One window resize up front; the capsule is re-anchored so it doesn't move.
         resizeWindow(toWidth, toHeight, toX, capsule)
         capsule.animate()
             .withLayer()
             .alpha(0f)
-            .scaleX(0.96f)
-            .scaleY(0.96f)
-            .setDuration(ANIMATION_DURATION_MS)
-            .setInterpolator(transitionInterpolator)
+            .scaleX(1.04f)
+            .scaleY(1.04f)
+            .setDuration(EXPAND_DURATION_MS / 2)
+            .setInterpolator(exitInterpolator)
             .withEndAction {
                 if (root === container && isExpanded) container.removeView(capsule)
             }
@@ -675,13 +723,12 @@ class FloatingPlayerOverlay(
         panel.animate()
             .withLayer()
             .alpha(1f)
-            .translationY(0f)
             .scaleX(1f)
             .scaleY(1f)
-            .setDuration(ANIMATION_DURATION_MS)
-            .setInterpolator(transitionInterpolator)
+            .setDuration(EXPAND_DURATION_MS)
+            .setInterpolator(enterInterpolator)
             .withEndAction {
-                if (root === container && isExpanded) isTransitioning = false
+                if (root === container && isExpanded) endTransition()
             }
             .start()
         updatePlaybackState()
@@ -694,13 +741,12 @@ class FloatingPlayerOverlay(
         if (!isExpanded || isCollapsing || isTransitioning) return
         isTransitioning = true
         isCollapsing = true
-        windowAnimator?.cancel()
-        windowAnimator = null
+        handler.removeCallbacks(updater)
         clearRenderedViews()
         val capsule = buildPill()
         capsule.alpha = 0f
-        capsule.scaleX = 0.96f
-        capsule.scaleY = 0.96f
+        capsule.scaleX = 1.04f
+        capsule.scaleY = 1.04f
         val currentWindowX = windowParams?.x ?: pillTouchLeft()
         container.addView(
             capsule,
@@ -714,8 +760,9 @@ class FloatingPlayerOverlay(
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
-            .setDuration(ANIMATION_DURATION_MS)
-            .setInterpolator(transitionInterpolator)
+            .setStartDelay(COLLAPSE_DURATION_MS / 3)
+            .setDuration(COLLAPSE_DURATION_MS * 2 / 3)
+            .setInterpolator(enterInterpolator)
             .start()
         val panel = expandedCard
         if (panel == null) {
@@ -725,11 +772,10 @@ class FloatingPlayerOverlay(
         panel.animate()
             .withLayer()
             .alpha(0f)
-            .translationY(-dp(6).toFloat())
-            .scaleX(0.97f)
-            .scaleY(0.97f)
-            .setDuration(ANIMATION_DURATION_MS)
-            .setInterpolator(transitionInterpolator)
+            .scaleX(morphStartScaleX)
+            .scaleY(MORPH_START_SCALE_Y)
+            .setDuration(COLLAPSE_DURATION_MS)
+            .setInterpolator(exitInterpolator)
             .withEndAction {
                 if (root === container) finishCollapse(container, capsule)
             }
@@ -744,7 +790,6 @@ class FloatingPlayerOverlay(
 
         isExpanded = false
         isCollapsing = false
-        isTransitioning = false
         expandedCard = null
         titleView = null
         artistView = null
@@ -755,22 +800,20 @@ class FloatingPlayerOverlay(
         favoriteButtonView = null
         favoriteSongId = null
         userIsSeeking = false
-        container.removeAllViews()
+        // Detach only the card; the capsule keeps running its fade-in undisturbed.
+        activePanel?.panel?.let { panel ->
+            panel.animate().cancel()
+            container.removeView(panel)
+        }
         // The detached card is reused next time instead of being rebuilt.
         preparedPanel = activePanel ?: preparedPanel
         activePanel = null
-        container.addView(
-            capsule,
-            FrameLayout.LayoutParams(toWidth, toHeight).apply {
-                gravity = Gravity.TOP or Gravity.START
-                leftMargin = pillTouchLeft() - (windowParams?.x ?: toX)
-            }
-        )
         container.setOnTouchListener(null)
         setWatchOutsideTouch(false)
         resizeWindow(toWidth, toHeight, toX, capsule)
         updatePlaybackState()
         schedulePanelPrebuild()
+        endTransition()
     }
 
     private fun buildPill(): View {
@@ -782,9 +825,7 @@ class FloatingPlayerOverlay(
             isClickable = true
             isFocusable = true
             contentDescription = "Expand or collapse floating music controls"
-            setOnClickListener {
-                if (isExpanded) collapse() else expand()
-            }
+            setOnClickListener { toggleExpanded() }
         }
 
         // Positions are relative to the collapsed window (the touch area).
@@ -849,9 +890,7 @@ class FloatingPlayerOverlay(
         isClickable = true
         isFocusable = true
         contentDescription = "Expand floating music controls"
-        setOnClickListener {
-            if (isExpanded) collapse() else expand()
-        }
+        setOnClickListener { toggleExpanded() }
         addView(content, FrameLayout.LayoutParams(contentWidth, contentHeight, Gravity.CENTER))
     }
 
@@ -1080,9 +1119,23 @@ class FloatingPlayerOverlay(
         }
     }
 
-    /** Animates the overlay bounds with its contents to avoid a snap on Android 12+. */
+    /**
+     * Moves the window to its new bounds in a single update and re-anchors the capsule so it
+     * stays put on screen. Resizing per animation frame forced a window relayout every frame.
+     */
     private fun resizeWindow(toWidth: Int, toHeight: Int, toX: Int, anchoredPill: View?) {
-        animateWindow(toWidth, toHeight, toX, anchoredPill)
+        val container = root ?: return
+        val params = windowParams ?: return
+        if (params.width == toWidth && params.height == toHeight && params.x == toX) return
+        params.width = toWidth
+        params.height = toHeight
+        params.x = toX
+        (anchoredPill?.takeIf { it.parent === container }?.layoutParams
+            as? FrameLayout.LayoutParams)?.let {
+            it.leftMargin = (pillTouchLeft() - toX).coerceAtLeast(0)
+            anchoredPill.layoutParams = it
+        }
+        updateWindowLayout(container, params)
     }
 
     private fun configureOutsideTap(container: FrameLayout) {
@@ -1091,7 +1144,7 @@ class FloatingPlayerOverlay(
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> true
                 MotionEvent.ACTION_OUTSIDE -> {
-                    collapse()
+                    requestCollapse()
                     true
                 }
                 MotionEvent.ACTION_UP -> {
@@ -1099,44 +1152,11 @@ class FloatingPlayerOverlay(
                     val insideCard = panel != null &&
                         event.x >= panel.left && event.x <= panel.right &&
                         event.y >= panel.top && event.y <= panel.bottom
-                    if (!insideCard) collapse()
+                    if (!insideCard) requestCollapse()
                     true
                 }
                 else -> true
             }
-        }
-    }
-
-    private fun animateWindow(
-        toWidth: Int,
-        toHeight: Int,
-        toX: Int,
-        anchoredPill: View?
-    ) {
-        val container = root ?: return
-        val params = windowParams ?: return
-        windowAnimator?.cancel()
-        val fromWidth = params.width
-        val fromHeight = params.height
-        val fromX = params.x
-        if (fromWidth == toWidth && fromHeight == toHeight && fromX == toX) return
-        windowAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = ANIMATION_DURATION_MS
-            interpolator = transitionInterpolator
-            addUpdateListener { animator ->
-                val fraction = animator.animatedFraction
-                params.width = (fromWidth + (toWidth - fromWidth) * fraction).toInt()
-                params.height =
-                    (fromHeight + (toHeight - fromHeight) * fraction).toInt()
-                params.x = (fromX + (toX - fromX) * fraction).toInt()
-                (anchoredPill?.takeIf { it.parent === container }?.layoutParams
-                    as? FrameLayout.LayoutParams)?.let {
-                    it.leftMargin = (pillTouchLeft() - params.x).coerceAtLeast(0)
-                    anchoredPill?.layoutParams = it
-                }
-                updateWindowLayout(container, params)
-            }
-            start()
         }
     }
 
@@ -1499,24 +1519,6 @@ class FloatingPlayerOverlay(
         }
     }
 
-    private fun pulse(view: View) {
-        view.animate().cancel()
-        view.scaleX = 1f
-        view.scaleY = 1f
-        view.animate()
-            .scaleX(1.08f)
-            .scaleY(1.08f)
-            .setDuration(90L)
-            .withEndAction {
-                view.animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(120L)
-                    .start()
-            }
-            .start()
-    }
-
     private enum class PlaybackButtonIcon {
         PREVIOUS,
         PLAY_PAUSE,
@@ -1538,15 +1540,6 @@ class FloatingPlayerOverlay(
                 if (field == value) return
                 field = value
                 invalidate()
-                animate().cancel()
-                scaleX = 0.9f
-                scaleY = 0.9f
-                animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(180L)
-                    .setInterpolator(PathInterpolator(0.4f, 0f, 0.2f, 1f))
-                    .start()
             }
 
         init {
@@ -1665,29 +1658,6 @@ class FloatingPlayerOverlay(
         // Show pressed state / ripple instantly instead of after the tap timeout.
         override fun shouldDelayChildPressedState(): Boolean = false
 
-        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-            if (isTransitioning) return true
-            if (!isExpanded) {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> animatePressed(true)
-                    MotionEvent.ACTION_UP,
-                    MotionEvent.ACTION_CANCEL -> animatePressed(false)
-                }
-            }
-            return super.dispatchTouchEvent(event)
-        }
-
-        private fun animatePressed(pressed: Boolean) {
-            val target = if (pressed) 0.94f else 1f
-            animate().cancel()
-            animate()
-                .scaleX(target)
-                .scaleY(target)
-                .setDuration(if (pressed) 80L else 160L)
-                .setInterpolator(DecelerateInterpolator())
-                .start()
-        }
-
         private fun isHorizontalSwipe(event: MotionEvent): Boolean {
             if (!capsuleSettings.swipeGestures) return false
             val dx = event.x - downX
@@ -1700,7 +1670,6 @@ class FloatingPlayerOverlay(
             if (event.x < downX) player.seekToNextMediaItem()
             else skipToPreviousTrack()
             performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            animatePressed(false)
         }
 
         override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
@@ -1775,7 +1744,6 @@ class FloatingPlayerOverlay(
         background = rippleBackground(circleBackground(0xFF263238.toInt()), 0x45FFFFFF)
         isClickable = true
         isFocusable = true
-        attachPressFeedback(this)
         setOnClickListener {
             action()
         }
@@ -1783,28 +1751,6 @@ class FloatingPlayerOverlay(
 
     private fun setTextIfChanged(view: TextView?, text: String) {
         if (view != null && view.text.toString() != text) view.text = text
-    }
-
-    /** Quick scale-down on press, scale-up on release. Does not consume the touch. */
-    private fun attachPressFeedback(view: View, pressedScale: Float = 0.9f) {
-        view.setOnTouchListener { v, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> v.animate()
-                    .scaleX(pressedScale)
-                    .scaleY(pressedScale)
-                    .setDuration(70L)
-                    .setInterpolator(DecelerateInterpolator())
-                    .start()
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> v.animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(150L)
-                    .setInterpolator(DecelerateInterpolator())
-                    .start()
-            }
-            false
-        }
     }
 
     private fun formatTime(timeMs: Long): String {
