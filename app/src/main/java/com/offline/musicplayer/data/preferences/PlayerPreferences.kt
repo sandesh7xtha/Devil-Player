@@ -15,6 +15,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.offline.musicplayer.data.model.CapsuleAnimationMode
 import com.offline.musicplayer.data.model.CapsulePosition
+import com.offline.musicplayer.data.model.CapsuleSize
 import com.offline.musicplayer.data.model.CapsuleSettings
 import com.offline.musicplayer.data.model.PlayerFeatureSettings
 import com.offline.musicplayer.data.model.SetupPromptState
@@ -53,6 +54,7 @@ class PlayerPreferences(private val context: Context) {
         private val KEY_CAPSULE_ENABLED = booleanPreferencesKey("capsule_enabled")
         private val KEY_CAPSULE_ANIMATION_MODE = stringPreferencesKey("capsule_animation_mode")
         private val KEY_CAPSULE_POSITION = stringPreferencesKey("capsule_position")
+        private val KEY_CAPSULE_SIZE = stringPreferencesKey("capsule_size")
         private val KEY_CAPSULE_SWIPE_GESTURES = booleanPreferencesKey("capsule_swipe_gestures")
         private val KEY_OVERLAY_SETUP_PROMPTED = booleanPreferencesKey("overlay_setup_prompted")
         private val KEY_BATTERY_GUIDANCE_SHOWN = booleanPreferencesKey("battery_guidance_shown")
@@ -73,6 +75,7 @@ class PlayerPreferences(private val context: Context) {
             KEY_CAPSULE_ENABLED,
             KEY_CAPSULE_ANIMATION_MODE,
             KEY_CAPSULE_POSITION,
+            KEY_CAPSULE_SIZE,
             KEY_CAPSULE_SWIPE_GESTURES
         )
     }
@@ -340,6 +343,9 @@ class PlayerPreferences(private val context: Context) {
     val capsuleSettings: Flow<CapsuleSettings> = setting { preferences ->
         CapsuleSettings(
             enabled = preferences[KEY_CAPSULE_ENABLED] ?: true,
+            size = preferences[KEY_CAPSULE_SIZE]
+                ?.let { name -> CapsuleSize.entries.firstOrNull { it.name == name } }
+                ?: CapsuleSize.MEDIUM,
             position = preferences[KEY_CAPSULE_POSITION]
                 ?.let { name -> CapsulePosition.entries.firstOrNull { it.name == name } }
                 ?: CapsulePosition.AROUND_CAMERA,
@@ -352,6 +358,10 @@ class PlayerPreferences(private val context: Context) {
 
     suspend fun setCapsuleEnabled(enabled: Boolean) {
         context.dataStore.edit { it[KEY_CAPSULE_ENABLED] = enabled }
+    }
+
+    suspend fun setCapsuleSize(size: CapsuleSize) {
+        context.dataStore.edit { it[KEY_CAPSULE_SIZE] = size.name }
     }
 
     suspend fun setCapsulePosition(position: CapsulePosition) {

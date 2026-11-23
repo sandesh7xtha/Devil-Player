@@ -23,8 +23,15 @@ enum class CapsulePosition(val label: String) {
     BELOW_STATUS_BAR("Below status bar")
 }
 
+enum class CapsuleSize(val label: String, val scale: Float) {
+    SMALL("Small", 0.85f),
+    MEDIUM("Medium", 1f),
+    LARGE("Large", 1.2f)
+}
+
 data class CapsuleSettings(
     val enabled: Boolean = true,
+    val size: CapsuleSize = CapsuleSize.MEDIUM,
     val position: CapsulePosition = CapsulePosition.AROUND_CAMERA,
     val animationMode: CapsuleAnimationMode = CapsuleAnimationMode.FULL,
     val swipeGestures: Boolean = true
