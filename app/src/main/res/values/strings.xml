@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Devil Play</string>
+    <string name="tab_songs">Songs</string>
+    <string name="tab_albums">Albums</string>
+    <string name="tab_artists">Artists</string>
+    <string name="search_placeholder">Search songs, artists, albums…</string>
+    <string name="permission_title">Storage Permission Required</string>
+    <string name="permission_desc">To play your offline music collection, Devil Play needs permission to scan audio files on this device.</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="empty_library">No music tracks found</string>
+    <string name="now_playing">Now Playing</string>
+    <string name="equalizer">Equalizer</string>
+    <string name="sleep_timer">Sleep Timer</string>
+    <string name="notification_channel_name">Music Playback</string>
+    <string name="notification_channel_desc">Shows playback controls and currently playing track</string>
+</resources>
