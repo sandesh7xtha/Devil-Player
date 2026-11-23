@@ -746,7 +746,6 @@ fun LibraryScreen(
                 onCapsuleEnabledChange = viewModel::setCapsuleEnabled,
                 onCapsuleSizeChange = viewModel::setCapsuleSize,
                 onCapsulePositionChange = viewModel::setCapsulePosition,
-                onCapsuleAnimationModeChange = viewModel::setCapsuleAnimationMode,
                 onCapsuleSwipeGesturesChange = viewModel::setCapsuleSwipeGestures,
                 onRescanLibrary = viewModel::loadLibrary,
                 onResetSettings = viewModel::resetSettings

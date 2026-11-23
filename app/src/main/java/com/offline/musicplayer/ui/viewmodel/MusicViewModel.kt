@@ -15,7 +15,6 @@ import androidx.media3.session.SessionToken
 import com.offline.musicplayer.audio.EqualizerManager
 import com.offline.musicplayer.data.model.Album
 import com.offline.musicplayer.data.model.Artist
-import com.offline.musicplayer.data.model.CapsuleAnimationMode
 import com.offline.musicplayer.data.model.CapsulePosition
 import com.offline.musicplayer.data.model.CapsuleSize
 import com.offline.musicplayer.data.model.CapsuleSettings
@@ -556,10 +555,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCapsulePosition(position: CapsulePosition) {
         viewModelScope.launch { preferences.setCapsulePosition(position) }
-    }
-
-    fun setCapsuleAnimationMode(mode: CapsuleAnimationMode) {
-        viewModelScope.launch { preferences.setCapsuleAnimationMode(mode) }
     }
 
     fun setCapsuleSwipeGestures(enabled: Boolean) {

@@ -8,12 +8,6 @@ data class PlayerFeatureSettings(
     val lyricsOffsetMs: Int = 0
 )
 
-enum class CapsuleAnimationMode(val label: String) {
-    FULL("Full"),
-    REDUCED("Reduced"),
-    OFF("Off")
-}
-
 /**
  * App overlays always sit below the system status bar, so a capsule placed around the
  * camera shares space with the clock and icons. BELOW_STATUS_BAR keeps it fully visible.
@@ -33,7 +27,6 @@ data class CapsuleSettings(
     val enabled: Boolean = true,
     val size: CapsuleSize = CapsuleSize.MEDIUM,
     val position: CapsulePosition = CapsulePosition.AROUND_CAMERA,
-    val animationMode: CapsuleAnimationMode = CapsuleAnimationMode.FULL,
     val swipeGestures: Boolean = true
 )
 
