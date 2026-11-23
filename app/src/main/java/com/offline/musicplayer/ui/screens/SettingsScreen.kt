@@ -65,7 +65,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.offline.musicplayer.BuildConfig
-import com.offline.musicplayer.data.model.CapsuleAnimationMode
 import com.offline.musicplayer.data.model.CapsulePosition
 import com.offline.musicplayer.data.model.CapsuleSize
 import com.offline.musicplayer.data.model.CapsuleSettings
@@ -98,7 +97,6 @@ class SettingsActions(
     val onCapsuleEnabledChange: (Boolean) -> Unit,
     val onCapsuleSizeChange: (CapsuleSize) -> Unit,
     val onCapsulePositionChange: (CapsulePosition) -> Unit,
-    val onCapsuleAnimationModeChange: (CapsuleAnimationMode) -> Unit,
     val onCapsuleSwipeGesturesChange: (Boolean) -> Unit,
     val onRescanLibrary: () -> Unit,
     val onResetSettings: () -> Unit
@@ -340,20 +338,6 @@ private fun CapsuleSection(settings: CapsuleSettings, actions: SettingsActions) 
             label = { it.label },
             enabled = settings.enabled,
             onSelect = actions.onCapsulePositionChange
-        )
-        RowDivider()
-        ChoiceRow(
-            title = "Animations",
-            subtitle = when (settings.animationMode) {
-                CapsuleAnimationMode.FULL -> "Spinning artwork and live level bars"
-                CapsuleAnimationMode.REDUCED -> "Slower level bars, no spinning · saves battery"
-                CapsuleAnimationMode.OFF -> "Static capsule · lowest battery use"
-            },
-            options = CapsuleAnimationMode.entries,
-            selected = settings.animationMode,
-            label = { it.label },
-            enabled = settings.enabled,
-            onSelect = actions.onCapsuleAnimationModeChange
         )
         RowDivider()
         SwitchRow(

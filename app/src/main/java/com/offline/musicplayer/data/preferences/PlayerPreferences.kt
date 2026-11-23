@@ -13,7 +13,6 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.offline.musicplayer.data.model.CapsuleAnimationMode
 import com.offline.musicplayer.data.model.CapsulePosition
 import com.offline.musicplayer.data.model.CapsuleSize
 import com.offline.musicplayer.data.model.CapsuleSettings
@@ -52,7 +51,6 @@ class PlayerPreferences(private val context: Context) {
         private val KEY_LYRICS_FONT_SIZE_SP = intPreferencesKey("lyrics_font_size_sp")
         private val KEY_LYRICS_OFFSET_MS = intPreferencesKey("lyrics_offset_ms")
         private val KEY_CAPSULE_ENABLED = booleanPreferencesKey("capsule_enabled")
-        private val KEY_CAPSULE_ANIMATION_MODE = stringPreferencesKey("capsule_animation_mode")
         private val KEY_CAPSULE_POSITION = stringPreferencesKey("capsule_position")
         private val KEY_CAPSULE_SIZE = stringPreferencesKey("capsule_size")
         private val KEY_CAPSULE_SWIPE_GESTURES = booleanPreferencesKey("capsule_swipe_gestures")
@@ -73,7 +71,6 @@ class PlayerPreferences(private val context: Context) {
             KEY_LYRICS_FONT_SIZE_SP,
             KEY_LYRICS_OFFSET_MS,
             KEY_CAPSULE_ENABLED,
-            KEY_CAPSULE_ANIMATION_MODE,
             KEY_CAPSULE_POSITION,
             KEY_CAPSULE_SIZE,
             KEY_CAPSULE_SWIPE_GESTURES
@@ -349,9 +346,6 @@ class PlayerPreferences(private val context: Context) {
             position = preferences[KEY_CAPSULE_POSITION]
                 ?.let { name -> CapsulePosition.entries.firstOrNull { it.name == name } }
                 ?: CapsulePosition.AROUND_CAMERA,
-            animationMode = preferences[KEY_CAPSULE_ANIMATION_MODE]
-                ?.let { name -> CapsuleAnimationMode.entries.firstOrNull { it.name == name } }
-                ?: CapsuleAnimationMode.FULL,
             swipeGestures = preferences[KEY_CAPSULE_SWIPE_GESTURES] ?: true
         )
     }
@@ -366,10 +360,6 @@ class PlayerPreferences(private val context: Context) {
 
     suspend fun setCapsulePosition(position: CapsulePosition) {
         context.dataStore.edit { it[KEY_CAPSULE_POSITION] = position.name }
-    }
-
-    suspend fun setCapsuleAnimationMode(mode: CapsuleAnimationMode) {
-        context.dataStore.edit { it[KEY_CAPSULE_ANIMATION_MODE] = mode.name }
     }
 
     suspend fun setCapsuleSwipeGestures(enabled: Boolean) {

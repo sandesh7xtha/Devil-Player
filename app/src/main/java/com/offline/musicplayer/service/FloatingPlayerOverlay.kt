@@ -2,7 +2,6 @@ package com.offline.musicplayer.service
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
-import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.KeyguardManager
 import android.content.BroadcastReceiver
@@ -29,7 +28,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.os.SystemClock
 import android.content.res.Configuration
 import android.provider.Settings
 import android.text.TextUtils
@@ -43,7 +41,6 @@ import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowManager
-import android.view.animation.LinearInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
@@ -56,8 +53,8 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.offline.musicplayer.MainActivity
 import com.offline.musicplayer.R
-import com.offline.musicplayer.data.model.CapsuleAnimationMode
 import com.offline.musicplayer.data.model.CapsulePosition
+import com.offline.musicplayer.data.model.CapsuleSize
 import com.offline.musicplayer.data.model.CapsuleSettings
 import com.offline.musicplayer.data.model.Song
 import com.offline.musicplayer.data.preferences.PlayerPreferences
@@ -90,10 +87,6 @@ class FloatingPlayerOverlay(
         private const val MAX_UNLOCK_CHECKS = 40
         private const val EXPANDED_UPDATE_INTERVAL_MS = 250L
 
-        // Island-style capsule, roughly the proportions of a phone's camera island.
-        private const val CAPSULE_MIN_HEIGHT_DP = 32
-        private const val CAPSULE_MAX_HEIGHT_DP = 38
-        private const val CAPSULE_CAMERA_RIM_DP = 4
         private const val CAPSULE_WAVE_SLOT_DP = 30
         private const val CAPSULE_NO_CAMERA_GAP_DP = 36
         private const val CAPSULE_CAMERA_GAP_DP = 4
@@ -149,8 +142,6 @@ class FloatingPlayerOverlay(
     private var artworkRequestId = 0
     private val artworkViews = mutableListOf<ImageView>()
     private val waveformViews = mutableListOf<AudioWaveformView>()
-    private var collapsedArtworkView: ImageView? = null
-    private var artworkRotationAnimator: ObjectAnimator? = null
     private var favoriteButtonView: TextView? = null
     private var favoriteSongId: String? = null
     private var favoriteSongIds: Set<String> = emptySet()
@@ -272,9 +263,6 @@ class FloatingPlayerOverlay(
             reason: Int
         ) {
             if (mediaItem != null) dismissedByUser = false
-            artworkRotationAnimator?.cancel()
-            artworkRotationAnimator = null
-            collapsedArtworkView?.rotation = 0f
             updatePlaybackState()
             syncVisibility()
         }
@@ -347,8 +335,6 @@ class FloatingPlayerOverlay(
             // The window moves, so rebuild it at the new place.
             removeOverlay()
             syncVisibility()
-        } else if (previous.animationMode != settings.animationMode && root != null && !isExpanded) {
-            renderCollapsed()
         }
     }
 
@@ -494,12 +480,8 @@ class FloatingPlayerOverlay(
             targetManager.addView(view, params)
             attachedWindowManager = targetManager
             view.alpha = 0f
-            view.scaleX = 0.82f
-            view.scaleY = 0.82f
             view.animate()
                 .alpha(1f)
-                .scaleX(1f)
-                .scaleY(1f)
                 .setDuration(ANIMATION_DURATION_MS)
                 .setInterpolator(DecelerateInterpolator(1.2f))
                 .start()
@@ -547,8 +529,6 @@ class FloatingPlayerOverlay(
         morphProgress = 0f
         morphView = null
         collapsedPill = null
-        artworkRotationAnimator?.cancel()
-        artworkRotationAnimator = null
         expandedCard?.animate()?.cancel()
         val attachedView = root
         attachedView?.animate()?.cancel()
@@ -590,8 +570,6 @@ class FloatingPlayerOverlay(
         handler.removeCallbacks(updater)
         view.animate()
             .alpha(0f)
-            .scaleX(0.82f)
-            .scaleY(0.82f)
             .setDuration(180L)
             .setInterpolator(DecelerateInterpolator(1.2f))
             .withEndAction {
@@ -720,14 +698,13 @@ class FloatingPlayerOverlay(
         expandedCard?.let { panel ->
             val contentAlpha = ((progress - 0.45f) / 0.55f).coerceIn(0f, 1f)
             panel.alpha = contentAlpha
-            panel.translationY = (1f - contentAlpha) * -dp(8)
             // Content never shows outside the shape while the shape is still growing.
             val shape = morphView?.currentBounds
             val params = panel.layoutParams as? FrameLayout.LayoutParams
             panel.clipBounds = if (progress >= 1f || shape == null || params == null) {
                 null
             } else {
-                val offsetY = params.topMargin + panel.translationY.toInt()
+                val offsetY = params.topMargin
                 Rect(
                     shape.left - params.leftMargin,
                     shape.top - offsetY,
@@ -766,6 +743,11 @@ class FloatingPlayerOverlay(
         val toWidth = expandedWidth()
         val toX = (displayWidth() - toWidth) / 2
         val cardWidth = toWidth - dp(24)
+        val cardLeftOnScreen = toX + dp(12)
+        // The open window spans both card and capsule, so the capsule is never clipped while
+        // the card shrinks back into it. With a corner camera the window doesn't move at all.
+        val windowX = min(toX, pillTouchLeft())
+        val windowRight = max(toX + toWidth, pillTouchLeft() + pillTouchWidth())
         val cardTop = expandedCardTop()
         val views = preparedPanel ?: buildExpandedCard()
         preparedPanel = null
@@ -780,9 +762,9 @@ class FloatingPlayerOverlay(
         val cardHeight = panel.measuredHeight
         val windowY = windowParams?.y ?: pillTouchTop()
         cardRectOnScreen.set(
-            toX + dp(12),
+            cardLeftOnScreen,
             windowY + cardTop,
-            toX + dp(12) + cardWidth,
+            cardLeftOnScreen + cardWidth,
             windowY + cardTop + cardHeight
         )
         panel.alpha = 0f
@@ -793,7 +775,7 @@ class FloatingPlayerOverlay(
             panel,
             FrameLayout.LayoutParams(cardWidth, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.TOP or Gravity.START
-                leftMargin = dp(12)
+                leftMargin = cardLeftOnScreen - windowX
                 topMargin = cardTop
             }
         )
@@ -801,7 +783,12 @@ class FloatingPlayerOverlay(
         setWatchOutsideTouch(true)
         // One window resize up front (room for the card and its shadow); the capsule is
         // re-anchored so it doesn't move.
-        resizeWindow(toWidth, cardTop + cardHeight + dp(16), toX, pill)
+        resizeWindow(
+            windowRight - windowX,
+            max(cardTop + cardHeight + dp(16), pillTouchHeight()),
+            windowX,
+            pill
+        )
         animateMorph(1f, EXPAND_DURATION_MS) {
             if (root === container && isExpanded) {
                 container.removeView(pill)
@@ -905,8 +892,6 @@ class FloatingPlayerOverlay(
             setImageResource(R.drawable.ic_launcher_foreground)
             isClickable = false
         }
-        collapsedArtworkView = image
-        updateArtworkRotation()
         artworkViews.add(image)
         pill.addView(
             capsuleTarget(image, artSize, artSize, artSlot, visibleHeight),
@@ -918,11 +903,6 @@ class FloatingPlayerOverlay(
         )
 
         val waveform = AudioWaveformView(context).apply {
-            frameIntervalMs = when (capsuleSettings.animationMode) {
-                CapsuleAnimationMode.FULL -> 42L
-                CapsuleAnimationMode.REDUCED -> 120L
-                CapsuleAnimationMode.OFF -> 0L
-            }
             isPlaying = player.isPlaying
         }
         waveformViews.add(waveform)
@@ -1251,7 +1231,6 @@ class FloatingPlayerOverlay(
             contentDescription = if (player.isPlaying) "Pause" else "Play"
         }
         waveformViews.forEach { it.isPlaying = player.isPlaying }
-        updateArtworkRotation()
         updateFavoriteButton()
 
         val isLive = metadata.extras?.getBoolean(Song.EXTRA_IS_LIVE_STREAM)
@@ -1418,10 +1397,14 @@ class FloatingPlayerOverlay(
         val scale = capsuleSettings.size.scale
         fun sized(valueDp: Int) = (valueDp * scale * context.resources.displayMetrics.density).toInt()
         val cameraHeight = camera?.height() ?: 0
-        // Never shorter than the camera, so the capsule always wraps it.
-        val height = (cameraHeight + sized(CAPSULE_CAMERA_RIM_DP) * 2)
-            .coerceIn(sized(CAPSULE_MIN_HEIGHT_DP), sized(CAPSULE_MAX_HEIGHT_DP))
-            .coerceAtLeast(cameraHeight + dp(4))
+        // Each size adds its own black rim around the camera, so sizes differ even when
+        // the camera, not the minimum, decides the height.
+        val (rimDp, minHeightDp) = when (capsuleSettings.size) {
+            CapsuleSize.SMALL -> 2 to 28
+            CapsuleSize.MEDIUM -> 4 to 34
+            CapsuleSize.LARGE -> 8 to 42
+        }
+        val height = max(dp(minHeightDp), cameraHeight + dp(rimDp) * 2)
         val artSlot = height
         val waveSlot = sized(CAPSULE_WAVE_SLOT_DP)
         val top = camera?.let { (it.centerY() - height / 2).coerceAtLeast(dp(2)) }
@@ -1524,37 +1507,6 @@ class FloatingPlayerOverlay(
             putExtra(MainActivity.EXTRA_OPEN_NOW_PLAYING, true)
         }
         context.startActivity(intent)
-    }
-
-    private fun updateArtworkRotation() {
-        val artwork = collapsedArtworkView ?: return
-        if (capsuleSettings.animationMode != CapsuleAnimationMode.FULL) {
-            artworkRotationAnimator?.cancel()
-            artworkRotationAnimator = null
-            artwork.rotation = 0f
-            return
-        }
-        if (!player.isPlaying) {
-            artworkRotationAnimator?.pause()
-            return
-        }
-        val currentAnimator = artworkRotationAnimator
-        if (currentAnimator?.target === artwork && currentAnimator.isStarted) {
-            if (currentAnimator.isPaused) currentAnimator.resume()
-            return
-        }
-        currentAnimator?.cancel()
-        artworkRotationAnimator = ObjectAnimator.ofFloat(
-            artwork,
-            View.ROTATION,
-            artwork.rotation,
-            artwork.rotation + 360f
-        ).apply {
-            duration = 8_000L
-            repeatCount = ValueAnimator.INFINITE
-            interpolator = LinearInterpolator()
-            start()
-        }
     }
 
     private fun updateFavoriteButton() {
@@ -1962,76 +1914,41 @@ class FloatingPlayerOverlay(
 
     private fun clearRenderedViews() {
         waveformViews.forEach { it.isPlaying = false }
-        artworkRotationAnimator?.cancel()
-        artworkRotationAnimator = null
-        collapsedArtworkView = null
         artworkViews.clear()
         waveformViews.clear()
     }
 
     /**
-     * Small animated level bars. A single self-rescheduling tick drives redraws, so repeated
-     * state updates can never stack extra redraw loops; frameIntervalMs = 0 draws it static.
+     * Still "now playing" bars: tall and uneven while playing, short and even when paused.
+     * It only redraws when the playing state changes, so nothing moves on its own.
      */
     private class AudioWaveformView(context: Context) : View(context) {
+        private companion object {
+            val PLAYING_HEIGHTS = floatArrayOf(0.5f, 0.95f, 0.65f, 0.85f)
+            val PAUSED_HEIGHTS = floatArrayOf(0.3f, 0.3f, 0.3f, 0.3f)
+        }
+
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF75D9C6.toInt()
             style = Paint.Style.FILL
         }
         private val minBarHeight = 3 * context.resources.displayMetrics.density
-        private val tick = Runnable {
-            invalidate()
-            scheduleTick()
-        }
-
-        var frameIntervalMs: Long = 42L
-            set(value) {
-                if (field == value) return
-                field = value
-                scheduleTick()
-            }
 
         var isPlaying: Boolean = false
             set(value) {
                 if (field == value) return
                 field = value
                 invalidate()
-                scheduleTick()
             }
-
-        private fun scheduleTick() {
-            removeCallbacks(tick)
-            if (isPlaying && frameIntervalMs > 0L && isAttachedToWindow) {
-                postDelayed(tick, frameIntervalMs)
-            }
-        }
-
-        override fun onAttachedToWindow() {
-            super.onAttachedToWindow()
-            scheduleTick()
-        }
-
-        override fun onDetachedFromWindow() {
-            removeCallbacks(tick)
-            super.onDetachedFromWindow()
-        }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val barCount = 4
-            val barWidth = width / (barCount * 2f)
-            val gap = barWidth
+            val heights = if (isPlaying) PLAYING_HEIGHTS else PAUSED_HEIGHTS
+            val barWidth = width / (heights.size * 2f)
             val centerY = height / 2f
-            val animate = isPlaying && frameIntervalMs > 0L
-            val phase = SystemClock.uptimeMillis() / 110f
-            for (index in 0 until barCount) {
-                val wave = when {
-                    animate -> 0.25f + 0.75f * abs(kotlin.math.sin(phase + index * 0.9f))
-                    isPlaying -> 0.55f + (index % 2) * 0.25f
-                    else -> 0.25f + index * 0.04f
-                }
-                val barHeight = (height * wave).coerceAtLeast(minBarHeight)
-                val left = index * (barWidth + gap)
+            heights.forEachIndexed { index, fraction ->
+                val barHeight = (height * fraction).coerceAtLeast(minBarHeight)
+                val left = index * barWidth * 2f
                 canvas.drawRoundRect(
                     left,
                     centerY - barHeight / 2f,
