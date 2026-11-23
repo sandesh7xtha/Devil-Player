@@ -79,8 +79,14 @@ class FloatingPlayerOverlay(
         private const val EXPAND_DURATION_MS = 400L
         private const val COLLAPSE_DURATION_MS = 320L
         private const val CARD_CORNER_RADIUS_DP = 26
+        // Swipe feedback: capsule content slides this far out and back in from the other side.
+        private const val SKIP_SLIDE_DP = 14
+        private const val SKIP_SLIDE_OUT_MS = 80L
+        private const val SKIP_SLIDE_IN_MS = 140L
         // The shape has elevation for its shadow; content must sit higher or it draws below it.
         private const val SHAPE_ELEVATION_DP = 10
+        // Extra wait after a window's frame is committed before relying on it being on screen.
+        private const val HANDOFF_MARGIN_MS = 34L
         private const val CONTENT_ELEVATION_DP = 11
         private const val UNLOCK_CHECK_INTERVAL_MS = 750L
         // ACTION_USER_PRESENT still covers later unlocks; polling is only a short fallback.
@@ -153,8 +159,14 @@ class FloatingPlayerOverlay(
     private var morphAnimator: ValueAnimator? = null
     private var morphProgress = 0f
     private val cardRectOnScreen = Rect()
+    // Capsule content inside the card window while it morphs to or from the capsule.
     private var collapsedPill: View? = null
+    // The card lives in its own window so the capsule window never moves or resizes; a
+    // window that moves while visible can draw one frame at the wrong place.
+    private var cardRoot: FrameLayout? = null
+    private var cardParams: WindowManager.LayoutParams? = null
     private val heroInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
+    private val skipOutInterpolator = PathInterpolator(0.3f, 0f, 1f, 1f)
 
     // The expanded card is built once, ahead of time, so tapping the capsule
     // doesn't have to create ~30 views on the main thread at that moment.
@@ -519,6 +531,7 @@ class FloatingPlayerOverlay(
     }
 
     private fun removeOverlay() {
+        removeCardWindow()
         handler.removeCallbacks(updater)
         handler.removeCallbacks(prebuildPanel)
         preparedPanel = null
@@ -568,6 +581,7 @@ class FloatingPlayerOverlay(
         isTransitioning = true
         pendingToggle = false
         handler.removeCallbacks(updater)
+        cardRoot?.animate()?.alpha(0f)?.setDuration(180L)?.start()
         view.animate()
             .alpha(0f)
             .setDuration(180L)
@@ -608,25 +622,10 @@ class FloatingPlayerOverlay(
 
         morphAnimator?.cancel()
         morphProgress = 0f
-        val pill = buildPill()
-        container.removeAllViews()
-        val shape = MorphShapeView(context)
-        morphView = shape
-        container.addView(
-            shape,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        container.addView(
-            pill,
-            FrameLayout.LayoutParams(pillTouchWidth(), pillTouchHeight()).apply {
-                gravity = Gravity.TOP or Gravity.START
-            }
-        )
-        collapsedPill = pill
-        container.setOnTouchListener(null)
+        isCollapsing = false
+        isTransitioning = false
+        pendingToggle = false
+        removeCardWindow()
         windowParams?.let {
             it.width = pillTouchWidth()
             it.height = pillTouchHeight()
@@ -634,7 +633,7 @@ class FloatingPlayerOverlay(
             it.y = pillTouchTop()
             updateWindowLayout(container, it)
         }
-        shape.refresh()
+        fillCapsuleWindow(container)
         updatePlaybackState()
     }
 
@@ -715,125 +714,245 @@ class FloatingPlayerOverlay(
         }
     }
 
-    /** Card top inside the window: in place over the capsule unless the status bar covers it. */
-    private fun expandedCardTop(): Int {
-        val capsuleTop = capsuleVisibleTop() - pillTouchTop()
-        val drawsOverStatusBar = CapsuleWindowHost.windowManager != null ||
-            capsuleSettings.position == CapsulePosition.BELOW_STATUS_BAR
-        return if (drawsOverStatusBar) {
-            capsuleTop
-        } else {
-            max(capsuleTop, statusBarHeight + dp(4) - pillTouchTop())
+    /** Capsule window content: the shape at capsule size and the pill with its icons. */
+    private fun fillCapsuleWindow(container: FrameLayout) {
+        clearRenderedViews()
+        container.removeAllViews()
+        container.setOnTouchListener(null)
+        val shape = MorphShapeView(context, { windowParams }, { 0f })
+        container.addView(
+            shape,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        container.addView(
+            buildPill(),
+            FrameLayout.LayoutParams(pillTouchWidth(), pillTouchHeight()).apply {
+                gravity = Gravity.TOP or Gravity.START
+            }
+        )
+        shape.refresh()
+    }
+
+    private fun setCapsuleWindowContentVisible(visible: Boolean) {
+        val container = root ?: return
+        for (index in 0 until container.childCount) {
+            container.getChildAt(index).visibility = if (visible) View.VISIBLE else View.INVISIBLE
         }
     }
 
-    /** Keeps the card's first row clear of the camera when the card opens over it. */
-    private fun cardTopPadding(cardTopInWindow: Int): Int {
-        val camera = cameraAnchor ?: return dp(14)
-        val cardTopOnScreen = pillTouchTop() + cardTopInWindow
-        return max(dp(14), camera.bottom - cardTopOnScreen + dp(10))
+    private fun removeCardWindow() {
+        val card = cardRoot ?: return
+        cardRoot = null
+        cardParams = null
+        morphView = null
+        collapsedPill = null
+        card.animate().cancel()
+        if (card.isAttachedToWindow) {
+            try {
+                attachedWindowManager?.removeView(card)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Card window was already removed.", e)
+            }
+        }
+    }
+
+    /**
+     * Runs [action] once [view]'s window has drawn and shown a frame, so a handoff between the
+     * capsule and card windows never leaves a frame with neither on screen.
+     */
+    private fun afterWindowShown(view: View, action: () -> Unit) {
+        view.post {
+            val done = Runnable { handler.postDelayed({ action() }, HANDOFF_MARGIN_MS) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                view.viewTreeObserver.registerFrameCommitCallback { handler.post(done) }
+                view.invalidate()
+            } else {
+                handler.postDelayed(done, 2 * HANDOFF_MARGIN_MS)
+            }
+        }
+    }
+
+    /** Keeps the card's first row clear of the camera and of a status bar drawn over it. */
+    private fun cardTopPadding(cardTopOnScreen: Int): Int {
+        var clearLine = cardTopOnScreen + dp(14)
+        cameraAnchor?.let { clearLine = max(clearLine, it.bottom + dp(10)) }
+        if (CapsuleWindowHost.windowManager == null) {
+            clearLine = max(clearLine, statusBarHeight + dp(8))
+        }
+        return clearLine - cardTopOnScreen
     }
 
     private fun expand() {
         val container = root ?: return
-        if (isExpanded || isCollapsing || isTransitioning) return
-        val pill = collapsedPill ?: return
+        val manager = attachedWindowManager ?: return
+        val capsuleParams = windowParams ?: return
+        if (isExpanded || isCollapsing || isTransitioning || cardRoot != null) return
         isTransitioning = true
 
-        val toWidth = expandedWidth()
-        val toX = (displayWidth() - toWidth) / 2
-        val cardWidth = toWidth - dp(24)
-        val cardLeftOnScreen = toX + dp(12)
-        // The open window spans both card and capsule, so the capsule is never clipped while
-        // the card shrinks back into it. With a corner camera the window doesn't move at all.
-        val windowX = min(toX, pillTouchLeft())
-        val windowRight = max(toX + toWidth, pillTouchLeft() + pillTouchWidth())
-        val cardTop = expandedCardTop()
+        // The card always covers the whole capsule (same top, at least as wide), so the
+        // capsule window underneath can never peek out while the shape morphs.
+        val nominalWidth = expandedWidth() - dp(24)
+        val nominalLeft = (displayWidth() - nominalWidth) / 2
+        val capsuleLeft = capsuleVisibleLeft()
+        val capsuleRight = capsuleLeft + capsuleVisibleWidth()
+        val cardLeftOnScreen = min(nominalLeft, capsuleLeft)
+        val cardRightOnScreen = max(nominalLeft + nominalWidth, capsuleRight)
+        val cardWidth = cardRightOnScreen - cardLeftOnScreen
+        val cardTopOnScreen = capsuleVisibleTop()
+
+        val windowX = max(0, min(cardLeftOnScreen - dp(12), pillTouchLeft()))
+        val windowRight = min(
+            displayWidth(),
+            max(cardRightOnScreen + dp(12), pillTouchLeft() + pillTouchWidth())
+        )
+        val windowY = capsuleParams.y
+
+        clearRenderedViews()
+        val pillClone = buildPill()
         val views = preparedPanel ?: buildExpandedCard()
         preparedPanel = null
-        clearRenderedViews()
         attachExpandedViews(views)
         val panel = views.panel
-        panel.setPadding(dp(16), cardTopPadding(cardTop), dp(16), dp(12))
+        panel.setPadding(dp(16), cardTopPadding(cardTopOnScreen), dp(16), dp(12))
         panel.measure(
             View.MeasureSpec.makeMeasureSpec(cardWidth, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
         val cardHeight = panel.measuredHeight
-        val windowY = windowParams?.y ?: pillTouchTop()
         cardRectOnScreen.set(
             cardLeftOnScreen,
-            windowY + cardTop,
-            cardLeftOnScreen + cardWidth,
-            windowY + cardTop + cardHeight
+            cardTopOnScreen,
+            cardRightOnScreen,
+            cardTopOnScreen + cardHeight
         )
-        panel.alpha = 0f
 
-        isExpanded = true
-        expandedCard = panel
-        container.addView(
+        val card = object : FrameLayout(context) {
+            override fun shouldDelayChildPressedState(): Boolean = false
+        }.apply {
+            clipChildren = false
+            clipToPadding = false
+        }
+        val params = WindowManager.LayoutParams(
+            windowRight - windowX,
+            cardTopOnScreen + cardHeight + dp(16) - windowY,
+            capsuleParams.type,
+            capsuleParams.flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = windowX
+            y = windowY
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        val shape = MorphShapeView(context, { cardParams }, { morphProgress })
+        card.addView(
+            shape,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        card.addView(
+            pillClone,
+            FrameLayout.LayoutParams(pillTouchWidth(), pillTouchHeight()).apply {
+                gravity = Gravity.TOP or Gravity.START
+                leftMargin = pillTouchLeft() - windowX
+                topMargin = pillTouchTop() - windowY
+            }
+        )
+        card.addView(
             panel,
             FrameLayout.LayoutParams(cardWidth, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.TOP or Gravity.START
                 leftMargin = cardLeftOnScreen - windowX
-                topMargin = cardTop
+                topMargin = cardTopOnScreen - windowY
             }
         )
-        configureOutsideTap(container)
-        setWatchOutsideTouch(true)
-        // One window resize up front (room for the card and its shadow); the capsule is
-        // re-anchored so it doesn't move.
-        resizeWindow(
-            windowRight - windowX,
-            max(cardTop + cardHeight + dp(16), pillTouchHeight()),
-            windowX,
-            pill
-        )
-        animateMorph(1f, EXPAND_DURATION_MS) {
-            if (root === container && isExpanded) {
-                container.removeView(pill)
-                if (collapsedPill === pill) collapsedPill = null
-                endTransition()
-            }
+
+        cardRoot = card
+        cardParams = params
+        morphView = shape
+        collapsedPill = pillClone
+        expandedCard = panel
+        isExpanded = true
+        morphProgress = 0f
+        applyMorphFrame()
+        configureOutsideTap(card)
+        try {
+            manager.addView(card, params)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Could not open the floating card.", e)
+            cardRoot = null
+            cardParams = null
+            morphView = null
+            collapsedPill = null
+            expandedCard = null
+            isExpanded = false
+            preparedPanel = activePanel
+            activePanel = null
+            fillCapsuleWindow(container)
+            updatePlaybackState()
+            endTransition()
+            return
         }
         updatePlaybackState()
+        // The card window starts as an exact copy of the capsule; hand over once it's shown.
+        afterWindowShown(card) {
+            if (cardRoot !== card || !isExpanded) return@afterWindowShown
+            setCapsuleWindowContentVisible(false)
+            animateMorph(1f, EXPAND_DURATION_MS) {
+                if (cardRoot === card && isExpanded) {
+                    card.removeView(pillClone)
+                    if (collapsedPill === pillClone) collapsedPill = null
+                    endTransition()
+                }
+            }
+        }
         handler.removeCallbacks(updater)
         handler.postDelayed(updater, EXPANDED_UPDATE_INTERVAL_MS)
     }
 
     private fun collapse() {
-        val container = root ?: return
+        val card = cardRoot ?: return
+        val params = cardParams ?: return
         if (!isExpanded || isCollapsing || isTransitioning) return
         isTransitioning = true
         isCollapsing = true
         handler.removeCallbacks(updater)
         clearRenderedViews()
-        val pill = buildPill()
-        pill.alpha = 0f
-        val currentWindowX = windowParams?.x ?: pillTouchLeft()
-        // Above the shape, below the card, so the card's buttons keep their taps.
-        container.addView(
-            pill,
+        val pillClone = buildPill()
+        pillClone.alpha = 0f
+        // Above the shape, below the card content, so the card's buttons keep their taps.
+        card.addView(
+            pillClone,
             1,
             FrameLayout.LayoutParams(pillTouchWidth(), pillTouchHeight()).apply {
                 gravity = Gravity.TOP or Gravity.START
-                leftMargin = pillTouchLeft() - currentWindowX
+                leftMargin = pillTouchLeft() - params.x
+                topMargin = pillTouchTop() - params.y
             }
         )
-        collapsedPill = pill
+        collapsedPill = pillClone
+        updatePlaybackState()
         animateMorph(0f, COLLAPSE_DURATION_MS) {
-            if (root === container) finishCollapse(container, pill)
+            if (cardRoot === card) finishCollapse(card)
         }
     }
 
-    private fun finishCollapse(container: FrameLayout, capsule: View) {
-        if (root !== container) return
-        val toWidth = pillTouchWidth()
-        val toHeight = pillTouchHeight()
-        val toX = pillTouchLeft()
-
+    /**
+     * The card window now shows exactly the capsule. The capsule window is rebuilt underneath
+     * with the same pixels, and the card window is removed only once that is on screen, so
+     * nothing visible ever moves.
+     */
+    private fun finishCollapse(card: FrameLayout) {
+        val container = root ?: return
         isExpanded = false
-        isCollapsing = false
         expandedCard = null
         titleView = null
         artistView = null
@@ -845,7 +964,7 @@ class FloatingPlayerOverlay(
         favoriteSongId = null
         userIsSeeking = false
         activePanel?.panel?.let { panel ->
-            container.removeView(panel)
+            card.removeView(panel)
             panel.alpha = 1f
             panel.translationY = 0f
             panel.clipBounds = null
@@ -853,12 +972,15 @@ class FloatingPlayerOverlay(
         // The detached card is reused next time instead of being rebuilt.
         preparedPanel = activePanel ?: preparedPanel
         activePanel = null
-        container.setOnTouchListener(null)
-        setWatchOutsideTouch(false)
-        resizeWindow(toWidth, toHeight, toX, capsule)
+        fillCapsuleWindow(container)
         updatePlaybackState()
-        schedulePanelPrebuild()
-        endTransition()
+        afterWindowShown(container) {
+            if (cardRoot === card) removeCardWindow()
+            isCollapsing = false
+            updatePlaybackState()
+            schedulePanelPrebuild()
+            endTransition()
+        }
     }
 
     private fun buildPill(): View {
@@ -1089,7 +1211,7 @@ class FloatingPlayerOverlay(
         controls.addView(playPause, LinearLayout.LayoutParams(dp(58), dp(58)))
         controls.addView(
             mediaControlButton(PlaybackButtonIcon.NEXT, "Next track") {
-                player.seekToNextMediaItem()
+                skipToNextTrack()
             },
             LinearLayout.LayoutParams(dp(48), dp(58)).apply {
                 leftMargin = dp(18)
@@ -1151,36 +1273,6 @@ class FloatingPlayerOverlay(
     private fun schedulePanelPrebuild() {
         handler.removeCallbacks(prebuildPanel)
         if (preparedPanel == null) handler.postDelayed(prebuildPanel, 500L)
-    }
-
-    /** Outside-touch events are only needed while the card is open. */
-    private fun setWatchOutsideTouch(enabled: Boolean) {
-        val params = windowParams ?: return
-        params.flags = if (enabled) {
-            params.flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-        } else {
-            params.flags and WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH.inv()
-        }
-    }
-
-    /**
-     * Moves the window to its new bounds in a single update and re-anchors the capsule so it
-     * stays put on screen. Resizing per animation frame forced a window relayout every frame.
-     */
-    private fun resizeWindow(toWidth: Int, toHeight: Int, toX: Int, anchoredPill: View?) {
-        val container = root ?: return
-        val params = windowParams ?: return
-        if (params.width == toWidth && params.height == toHeight && params.x == toX) return
-        params.width = toWidth
-        params.height = toHeight
-        params.x = toX
-        (anchoredPill?.takeIf { it.parent === container }?.layoutParams
-            as? FrameLayout.LayoutParams)?.let {
-            it.leftMargin = (pillTouchLeft() - toX).coerceAtLeast(0)
-            anchoredPill.layoutParams = it
-        }
-        updateWindowLayout(container, params)
-        morphView?.refresh()
     }
 
     private fun configureOutsideTap(container: FrameLayout) {
@@ -1537,14 +1629,29 @@ class FloatingPlayerOverlay(
         }
     }
 
-    private fun skipToPreviousTrack() {
-        if (player.mediaItemCount == 0) return
+    private fun hasPreviousTrack(): Boolean {
         val previousIndex = player.previousMediaItemIndex
-        if (previousIndex >= 0 && previousIndex != player.currentMediaItemIndex) {
-            player.seekToDefaultPosition(previousIndex)
+        return player.mediaItemCount > 0 &&
+            previousIndex >= 0 && previousIndex != player.currentMediaItemIndex
+    }
+
+    /** Returns true when playback moved to another track (not just back to the start). */
+    private fun skipToPreviousTrack(): Boolean {
+        if (player.mediaItemCount == 0) return false
+        return if (hasPreviousTrack()) {
+            player.seekToDefaultPosition(player.previousMediaItemIndex)
+            true
         } else {
             player.seekToDefaultPosition()
+            false
         }
+    }
+
+    /** Returns true when there was a next track to move to. */
+    private fun skipToNextTrack(): Boolean {
+        if (!player.hasNextMediaItem()) return false
+        player.seekToNextMediaItem()
+        return true
     }
 
     private enum class PlaybackButtonIcon {
@@ -1695,9 +1802,105 @@ class FloatingPlayerOverlay(
 
         // Fire as soon as the swipe is recognised instead of waiting for release.
         private fun commitSwipe(event: MotionEvent) {
-            if (event.x < downX) player.seekToNextMediaItem()
-            else skipToPreviousTrack()
-            performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            val toNext = event.x < downX
+            val canSkip = if (toNext) player.hasNextMediaItem() else hasPreviousTrack()
+            if (!canSkip) {
+                // Nothing to skip to: a lighter tick and no slide, so the slide always means
+                // the track changed. Previous still restarts the current track.
+                if (!toNext) skipToPreviousTrack()
+                performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                return
+            }
+            performHapticFeedback(
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    HapticFeedbackConstants.CONFIRM
+                } else {
+                    HapticFeedbackConstants.VIRTUAL_KEY
+                }
+            )
+            playSkipSlide(toNext) {
+                if (toNext) skipToNextTrack() else skipToPreviousTrack()
+            }
+        }
+
+        private var skipAnimator: ValueAnimator? = null
+        private var pendingSkip: (() -> Unit)? = null
+
+        /**
+         * Slides the artwork and bars out in the swipe direction, changes track while they
+         * are hidden, then slides them in from the other side. Changing track blocks the main
+         * thread briefly, so it happens in the hidden gap and never stalls a visible frame.
+         * Only the content moves; the capsule shape stays put.
+         */
+        private fun playSkipSlide(toNext: Boolean, skip: () -> Unit) {
+            runPendingSkip()
+            skipAnimator?.cancel()
+            val distance = dp(SKIP_SLIDE_DP).toFloat() * if (toNext) -1f else 1f
+            pendingSkip = skip
+            skipAnimator = slideAnimator(SKIP_SLIDE_OUT_MS) { fraction ->
+                val eased = skipOutInterpolator.getInterpolation(fraction)
+                setContent(distance * eased, 1f - eased)
+            }.apply {
+                addListener(object : AnimatorListenerAdapter() {
+                    private var cancelled = false
+                    override fun onAnimationCancel(animation: Animator) {
+                        cancelled = true
+                    }
+
+                    override fun onAnimationEnd(animation: Animator) {
+                        runPendingSkip()
+                        if (cancelled) {
+                            setContent(0f, 1f)
+                            return
+                        }
+                        // Start sliding in only after the track change has finished.
+                        post { slideIn(distance) }
+                    }
+                })
+                start()
+            }
+        }
+
+        private fun slideIn(distance: Float) {
+            skipAnimator = slideAnimator(SKIP_SLIDE_IN_MS) { fraction ->
+                val eased = heroInterpolator.getInterpolation(fraction)
+                setContent(-distance * (1f - eased), eased)
+            }.apply {
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) = setContent(0f, 1f)
+                    override fun onAnimationCancel(animation: Animator) = setContent(0f, 1f)
+                })
+                start()
+            }
+        }
+
+        private fun slideAnimator(durationMs: Long, onFrame: (Float) -> Unit) =
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = durationMs
+                interpolator = null
+                addUpdateListener { onFrame(it.animatedFraction) }
+            }
+
+        private fun runPendingSkip() {
+            val skip = pendingSkip ?: return
+            pendingSkip = null
+            skip()
+        }
+
+        private fun setContent(offset: Float, opacity: Float) {
+            for (index in 0 until childCount) {
+                getChildAt(index).apply {
+                    translationX = offset
+                    alpha = opacity
+                }
+            }
+        }
+
+        override fun onDetachedFromWindow() {
+            // A swipe that was already accepted still changes track.
+            skipAnimator?.cancel()
+            runPendingSkip()
+            super.onDetachedFromWindow()
         }
 
         override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
@@ -1819,7 +2022,11 @@ class FloatingPlayerOverlay(
      * The one surface shared by capsule and card. Its bounds, corner radius and colour follow
      * [morphProgress]; the outline follows too, so the shadow morphs with it.
      */
-    private inner class MorphShapeView(context: Context) : View(context) {
+    private inner class MorphShapeView(
+        context: Context,
+        private val windowParamsOf: () -> WindowManager.LayoutParams?,
+        private val progressOf: () -> Float
+    ) : View(context) {
         private val capsuleShape = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             setColor(0xFF000000.toInt())
@@ -1837,7 +2044,6 @@ class FloatingPlayerOverlay(
         val currentBounds: Rect get() = bounds
 
         init {
-            elevation = dp(SHAPE_ELEVATION_DP).toFloat()
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
                     outline.setRoundRect(bounds, radius)
@@ -1846,9 +2052,13 @@ class FloatingPlayerOverlay(
         }
 
         fun refresh() {
-            val progress = morphProgress
-            val originX = windowParams?.x ?: 0
-            val originY = windowParams?.y ?: 0
+            val progress = progressOf()
+            // No shadow at capsule size, so the card window's copy and the capsule window
+            // are pixel-identical at the handoff; the shadow grows in with the card.
+            elevation = dp(SHAPE_ELEVATION_DP) * (progress / 0.2f).coerceIn(0f, 1f)
+            val params = windowParamsOf()
+            val originX = params?.x ?: 0
+            val originY = params?.y ?: 0
             val left = capsuleVisibleLeft() - originX
             val top = capsuleVisibleTop() - originY
             val right = left + capsuleVisibleWidth()
@@ -1877,7 +2087,7 @@ class FloatingPlayerOverlay(
 
         override fun onDraw(canvas: Canvas) {
             // Black capsule turns into the card colour over the first part of the growth.
-            val cardAlpha = (morphProgress / 0.6f).coerceIn(0f, 1f)
+            val cardAlpha = (progressOf() / 0.6f).coerceIn(0f, 1f)
             if (cardAlpha < 1f) {
                 capsuleShape.bounds = bounds
                 capsuleShape.cornerRadius = radius
