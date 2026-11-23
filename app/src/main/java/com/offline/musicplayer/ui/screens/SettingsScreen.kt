@@ -67,6 +67,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.offline.musicplayer.BuildConfig
 import com.offline.musicplayer.data.model.CapsuleAnimationMode
 import com.offline.musicplayer.data.model.CapsulePosition
+import com.offline.musicplayer.data.model.CapsuleSize
 import com.offline.musicplayer.data.model.CapsuleSettings
 import com.offline.musicplayer.data.model.EqualizerState
 import com.offline.musicplayer.data.model.PlayerFeatureSettings
@@ -95,6 +96,7 @@ class SettingsActions(
     val onLyricsFontSizeChange: (Int) -> Unit,
     val onLyricsOffsetChange: (Int) -> Unit,
     val onCapsuleEnabledChange: (Boolean) -> Unit,
+    val onCapsuleSizeChange: (CapsuleSize) -> Unit,
     val onCapsulePositionChange: (CapsulePosition) -> Unit,
     val onCapsuleAnimationModeChange: (CapsuleAnimationMode) -> Unit,
     val onCapsuleSwipeGesturesChange: (Boolean) -> Unit,
@@ -314,6 +316,16 @@ private fun CapsuleSection(settings: CapsuleSettings, actions: SettingsActions) 
             subtitle = "Floating music controls while you use other apps",
             checked = settings.enabled,
             onCheckedChange = actions.onCapsuleEnabledChange
+        )
+        RowDivider()
+        ChoiceRow(
+            title = "Size",
+            subtitle = "Capsule height and width; it always stays big enough to wrap the camera",
+            options = CapsuleSize.entries,
+            selected = settings.size,
+            label = { it.label },
+            enabled = settings.enabled,
+            onSelect = actions.onCapsuleSizeChange
         )
         RowDivider()
         ChoiceRow(

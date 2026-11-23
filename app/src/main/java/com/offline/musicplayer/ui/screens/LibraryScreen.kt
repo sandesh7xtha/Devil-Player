@@ -744,6 +744,7 @@ fun LibraryScreen(
                 onLyricsFontSizeChange = viewModel::setLyricsFontSizeSp,
                 onLyricsOffsetChange = viewModel::setLyricsOffsetMs,
                 onCapsuleEnabledChange = viewModel::setCapsuleEnabled,
+                onCapsuleSizeChange = viewModel::setCapsuleSize,
                 onCapsulePositionChange = viewModel::setCapsulePosition,
                 onCapsuleAnimationModeChange = viewModel::setCapsuleAnimationMode,
                 onCapsuleSwipeGesturesChange = viewModel::setCapsuleSwipeGestures,

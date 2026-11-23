@@ -1,5 +1,7 @@
 package com.offline.musicplayer.service
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.app.KeyguardManager
@@ -11,6 +13,7 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -37,6 +40,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.LinearInterpolator
@@ -75,10 +79,12 @@ class FloatingPlayerOverlay(
     companion object {
         private const val TAG = "FloatingPlayerOverlay"
         private const val ANIMATION_DURATION_MS = 240L
-        private const val EXPAND_DURATION_MS = 280L
-        private const val COLLAPSE_DURATION_MS = 220L
-        // Height the card starts from (as a fraction) when it grows out of the capsule.
-        private const val MORPH_START_SCALE_Y = 0.35f
+        private const val EXPAND_DURATION_MS = 400L
+        private const val COLLAPSE_DURATION_MS = 320L
+        private const val CARD_CORNER_RADIUS_DP = 26
+        // The shape has elevation for its shadow; content must sit higher or it draws below it.
+        private const val SHAPE_ELEVATION_DP = 10
+        private const val CONTENT_ELEVATION_DP = 11
         private const val UNLOCK_CHECK_INTERVAL_MS = 750L
         // ACTION_USER_PRESENT still covers later unlocks; polling is only a short fallback.
         private const val MAX_UNLOCK_CHECKS = 40
@@ -149,14 +155,15 @@ class FloatingPlayerOverlay(
     private var favoriteSongId: String? = null
     private var favoriteSongIds: Set<String> = emptySet()
 
-    private val transitionInterpolator = PathInterpolator(0.4f, 0f, 0.2f, 1f)
-    // Material "emphasized" curves: quick start that settles gently, and its reverse.
-    private val enterInterpolator = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
-    private val exitInterpolator = PathInterpolator(0.3f, 0f, 0.8f, 0.15f)
     // A tap that arrives mid-transition runs once the transition ends instead of being lost.
     private var pendingToggle = false
-    // Width of the capsule relative to the card; the card's starting horizontal scale.
-    private var morphStartScaleX = 0.4f
+    // Hero transition: one shape morphs between the capsule (0) and the card (1).
+    private var morphView: MorphShapeView? = null
+    private var morphAnimator: ValueAnimator? = null
+    private var morphProgress = 0f
+    private val cardRectOnScreen = Rect()
+    private var collapsedPill: View? = null
+    private val heroInterpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
 
     // The expanded card is built once, ahead of time, so tapping the capsule
     // doesn't have to create ~30 views on the main thread at that moment.
@@ -334,7 +341,9 @@ class FloatingPlayerOverlay(
             if (settings.enabled) dismissedByUser = false
             syncVisibility()
         }
-        if (previous.position != settings.position && root != null) {
+        if ((previous.position != settings.position || previous.size != settings.size) &&
+            root != null
+        ) {
             // The window moves, so rebuild it at the new place.
             removeOverlay()
             syncVisibility()
@@ -533,6 +542,11 @@ class FloatingPlayerOverlay(
         preparedPanel = null
         activePanel = null
         pendingToggle = false
+        morphAnimator?.cancel()
+        morphAnimator = null
+        morphProgress = 0f
+        morphView = null
+        collapsedPill = null
         artworkRotationAnimator?.cancel()
         artworkRotationAnimator = null
         expandedCard?.animate()?.cancel()
@@ -614,14 +628,26 @@ class FloatingPlayerOverlay(
         favoriteSongId = null
         clearRenderedViews()
 
+        morphAnimator?.cancel()
+        morphProgress = 0f
         val pill = buildPill()
         container.removeAllViews()
+        val shape = MorphShapeView(context)
+        morphView = shape
+        container.addView(
+            shape,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
         container.addView(
             pill,
             FrameLayout.LayoutParams(pillTouchWidth(), pillTouchHeight()).apply {
                 gravity = Gravity.TOP or Gravity.START
             }
         )
+        collapsedPill = pill
         container.setOnTouchListener(null)
         windowParams?.let {
             it.width = pillTouchWidth()
@@ -630,6 +656,7 @@ class FloatingPlayerOverlay(
             it.y = pillTouchTop()
             updateWindowLayout(container, it)
         }
+        shape.refresh()
         updatePlaybackState()
     }
 
@@ -658,79 +685,130 @@ class FloatingPlayerOverlay(
     }
 
     /**
-     * Scales the card around the capsule's centre so it appears to grow out of, and shrink
-     * back into, the capsule. Only RenderNode properties animate, so it runs on the
-     * RenderThread at full frame rate with no layout or window work per frame.
+     * Drives the hero transition. Each frame only re-draws the shared shape and fades the
+     * two contents, so there is no layout or window work while it runs.
      */
-    private fun applyMorphPivot(panel: View, windowX: Int) {
-        val panelLeft = windowX + dp(12)
-        val panelWidth = expandedWidth() - dp(24)
-        panel.pivotX = (capsuleVisibleLeft() + capsuleVisibleWidth() / 2 - panelLeft).toFloat()
-        panel.pivotY = (
-            capsuleVisibleTop() - pillTouchTop() + capsuleVisibleHeight() / 2 - expandedCardTop()
-            ).toFloat()
-        morphStartScaleX = capsuleVisibleWidth().toFloat() / panelWidth
+    private fun animateMorph(target: Float, durationMs: Long, onEnd: () -> Unit) {
+        morphAnimator?.cancel()
+        val distance = abs(target - morphProgress).coerceIn(0f, 1f)
+        morphAnimator = ValueAnimator.ofFloat(morphProgress, target).apply {
+            duration = (durationMs * distance).toLong().coerceAtLeast(1L)
+            interpolator = heroInterpolator
+            addUpdateListener {
+                morphProgress = it.animatedValue as Float
+                applyMorphFrame()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                private var cancelled = false
+                override fun onAnimationCancel(animation: Animator) {
+                    cancelled = true
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    if (!cancelled) onEnd()
+                }
+            })
+            start()
+        }
+    }
+
+    /** Capsule icons fade out as the shape starts growing; card content fades in as it lands. */
+    private fun applyMorphFrame() {
+        val progress = morphProgress
+        morphView?.refresh()
+        collapsedPill?.alpha = 1f - (progress / 0.3f).coerceIn(0f, 1f)
+        expandedCard?.let { panel ->
+            val contentAlpha = ((progress - 0.45f) / 0.55f).coerceIn(0f, 1f)
+            panel.alpha = contentAlpha
+            panel.translationY = (1f - contentAlpha) * -dp(8)
+            // Content never shows outside the shape while the shape is still growing.
+            val shape = morphView?.currentBounds
+            val params = panel.layoutParams as? FrameLayout.LayoutParams
+            panel.clipBounds = if (progress >= 1f || shape == null || params == null) {
+                null
+            } else {
+                val offsetY = params.topMargin + panel.translationY.toInt()
+                Rect(
+                    shape.left - params.leftMargin,
+                    shape.top - offsetY,
+                    shape.right - params.leftMargin,
+                    shape.bottom - offsetY
+                )
+            }
+        }
+    }
+
+    /** Card top inside the window: in place over the capsule unless the status bar covers it. */
+    private fun expandedCardTop(): Int {
+        val capsuleTop = capsuleVisibleTop() - pillTouchTop()
+        val drawsOverStatusBar = CapsuleWindowHost.windowManager != null ||
+            capsuleSettings.position == CapsulePosition.BELOW_STATUS_BAR
+        return if (drawsOverStatusBar) {
+            capsuleTop
+        } else {
+            max(capsuleTop, statusBarHeight + dp(4) - pillTouchTop())
+        }
+    }
+
+    /** Keeps the card's first row clear of the camera when the card opens over it. */
+    private fun cardTopPadding(cardTopInWindow: Int): Int {
+        val camera = cameraAnchor ?: return dp(14)
+        val cardTopOnScreen = pillTouchTop() + cardTopInWindow
+        return max(dp(14), camera.bottom - cardTopOnScreen + dp(10))
     }
 
     private fun expand() {
         val container = root ?: return
         if (isExpanded || isCollapsing || isTransitioning) return
-
-        val capsule = container.getChildAt(0) ?: return
+        val pill = collapsedPill ?: return
         isTransitioning = true
+
         val toWidth = expandedWidth()
-        val toHeight = expandedHeight()
         val toX = (displayWidth() - toWidth) / 2
+        val cardWidth = toWidth - dp(24)
+        val cardTop = expandedCardTop()
         val views = preparedPanel ?: buildExpandedCard()
         preparedPanel = null
         clearRenderedViews()
         attachExpandedViews(views)
         val panel = views.panel
-        applyMorphPivot(panel, toX)
+        panel.setPadding(dp(16), cardTopPadding(cardTop), dp(16), dp(12))
+        panel.measure(
+            View.MeasureSpec.makeMeasureSpec(cardWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val cardHeight = panel.measuredHeight
+        val windowY = windowParams?.y ?: pillTouchTop()
+        cardRectOnScreen.set(
+            toX + dp(12),
+            windowY + cardTop,
+            toX + dp(12) + cardWidth,
+            windowY + cardTop + cardHeight
+        )
         panel.alpha = 0f
-        panel.translationY = 0f
-        panel.scaleX = morphStartScaleX
-        panel.scaleY = MORPH_START_SCALE_Y
 
         isExpanded = true
         expandedCard = panel
         container.addView(
             panel,
-            FrameLayout.LayoutParams(
-                toWidth - dp(24),
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
+            FrameLayout.LayoutParams(cardWidth, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.TOP or Gravity.START
                 leftMargin = dp(12)
-                topMargin = expandedCardTop()
+                topMargin = cardTop
             }
         )
         configureOutsideTap(container)
         setWatchOutsideTouch(true)
-        // One window resize up front; the capsule is re-anchored so it doesn't move.
-        resizeWindow(toWidth, toHeight, toX, capsule)
-        capsule.animate()
-            .withLayer()
-            .alpha(0f)
-            .scaleX(1.04f)
-            .scaleY(1.04f)
-            .setDuration(EXPAND_DURATION_MS / 2)
-            .setInterpolator(exitInterpolator)
-            .withEndAction {
-                if (root === container && isExpanded) container.removeView(capsule)
+        // One window resize up front (room for the card and its shadow); the capsule is
+        // re-anchored so it doesn't move.
+        resizeWindow(toWidth, cardTop + cardHeight + dp(16), toX, pill)
+        animateMorph(1f, EXPAND_DURATION_MS) {
+            if (root === container && isExpanded) {
+                container.removeView(pill)
+                if (collapsedPill === pill) collapsedPill = null
+                endTransition()
             }
-            .start()
-        panel.animate()
-            .withLayer()
-            .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setDuration(EXPAND_DURATION_MS)
-            .setInterpolator(enterInterpolator)
-            .withEndAction {
-                if (root === container && isExpanded) endTransition()
-            }
-            .start()
+        }
         updatePlaybackState()
         handler.removeCallbacks(updater)
         handler.postDelayed(updater, EXPANDED_UPDATE_INTERVAL_MS)
@@ -743,43 +821,22 @@ class FloatingPlayerOverlay(
         isCollapsing = true
         handler.removeCallbacks(updater)
         clearRenderedViews()
-        val capsule = buildPill()
-        capsule.alpha = 0f
-        capsule.scaleX = 1.04f
-        capsule.scaleY = 1.04f
+        val pill = buildPill()
+        pill.alpha = 0f
         val currentWindowX = windowParams?.x ?: pillTouchLeft()
+        // Above the shape, below the card, so the card's buttons keep their taps.
         container.addView(
-            capsule,
+            pill,
+            1,
             FrameLayout.LayoutParams(pillTouchWidth(), pillTouchHeight()).apply {
                 gravity = Gravity.TOP or Gravity.START
                 leftMargin = pillTouchLeft() - currentWindowX
             }
         )
-        capsule.animate()
-            .withLayer()
-            .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setStartDelay(COLLAPSE_DURATION_MS / 3)
-            .setDuration(COLLAPSE_DURATION_MS * 2 / 3)
-            .setInterpolator(enterInterpolator)
-            .start()
-        val panel = expandedCard
-        if (panel == null) {
-            finishCollapse(container, capsule)
-            return
+        collapsedPill = pill
+        animateMorph(0f, COLLAPSE_DURATION_MS) {
+            if (root === container) finishCollapse(container, pill)
         }
-        panel.animate()
-            .withLayer()
-            .alpha(0f)
-            .scaleX(morphStartScaleX)
-            .scaleY(MORPH_START_SCALE_Y)
-            .setDuration(COLLAPSE_DURATION_MS)
-            .setInterpolator(exitInterpolator)
-            .withEndAction {
-                if (root === container) finishCollapse(container, capsule)
-            }
-            .start()
     }
 
     private fun finishCollapse(container: FrameLayout, capsule: View) {
@@ -800,10 +857,11 @@ class FloatingPlayerOverlay(
         favoriteButtonView = null
         favoriteSongId = null
         userIsSeeking = false
-        // Detach only the card; the capsule keeps running its fade-in undisturbed.
         activePanel?.panel?.let { panel ->
-            panel.animate().cancel()
             container.removeView(panel)
+            panel.alpha = 1f
+            panel.translationY = 0f
+            panel.clipBounds = null
         }
         // The detached card is reused next time instead of being rebuilt.
         preparedPanel = activePanel ?: preparedPanel
@@ -817,11 +875,12 @@ class FloatingPlayerOverlay(
     }
 
     private fun buildPill(): View {
+        // The shared morph shape draws the capsule; the pill only holds its content.
         val pill = CapsulePill(context).apply {
-            background = capsuleBackground()
+            raiseAboveShape(this)
+            foreground = capsuleRipple()
             setPadding(0, 0, 0, 0)
             clipToPadding = false
-            elevation = dp(10).toFloat()
             isClickable = true
             isFocusable = true
             contentDescription = "Expand or collapse floating music controls"
@@ -833,9 +892,9 @@ class FloatingPlayerOverlay(
         val touchLeft = pillTouchLeft()
         val visibleTop = layout.top - pillTouchTop()
         val visibleHeight = layout.height
-        val artSlot = visibleHeight
-        val artSize = visibleHeight - dp(10)
-        val waveSlot = dp(CAPSULE_WAVE_SLOT_DP)
+        val artSlot = layout.artSlot
+        val artSize = (visibleHeight * 0.72f).toInt()
+        val waveSlot = layout.waveSlot
         val artLeft = layout.artLeft - touchLeft
         val waveLeft = layout.waveLeft - touchLeft
 
@@ -868,7 +927,13 @@ class FloatingPlayerOverlay(
         }
         waveformViews.add(waveform)
         pill.addView(
-            capsuleTarget(waveform, dp(18), visibleHeight - dp(16), waveSlot, visibleHeight),
+            capsuleTarget(
+                waveform,
+                (waveSlot * 0.6f).toInt(),
+                (visibleHeight * 0.56f).toInt(),
+                waveSlot,
+                visibleHeight
+            ),
             FrameLayout.LayoutParams(waveSlot, visibleHeight).apply {
                 gravity = Gravity.TOP or Gravity.START
                 leftMargin = waveLeft
@@ -901,8 +966,7 @@ class FloatingPlayerOverlay(
         }.apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(12))
-            background = cardBackground()
-            elevation = dp(12).toFloat()
+            raiseAboveShape(this)
         }
 
         val header = LinearLayout(context).apply {
@@ -1136,6 +1200,7 @@ class FloatingPlayerOverlay(
             anchoredPill.layoutParams = it
         }
         updateWindowLayout(container, params)
+        morphView?.refresh()
     }
 
     private fun configureOutsideTap(container: FrameLayout) {
@@ -1335,7 +1400,9 @@ class FloatingPlayerOverlay(
         val width: Int,
         val height: Int,
         val artLeft: Int,
-        val waveLeft: Int
+        val waveLeft: Int,
+        val artSlot: Int,
+        val waveSlot: Int
     )
 
     /**
@@ -1348,10 +1415,15 @@ class FloatingPlayerOverlay(
         val edge = dp(8)
         val gap = dp(CAPSULE_CAMERA_GAP_DP)
         val camera = cameraAnchor
-        val height = ((camera?.height() ?: 0) + dp(CAPSULE_CAMERA_RIM_DP) * 2)
-            .coerceIn(dp(CAPSULE_MIN_HEIGHT_DP), dp(CAPSULE_MAX_HEIGHT_DP))
+        val scale = capsuleSettings.size.scale
+        fun sized(valueDp: Int) = (valueDp * scale * context.resources.displayMetrics.density).toInt()
+        val cameraHeight = camera?.height() ?: 0
+        // Never shorter than the camera, so the capsule always wraps it.
+        val height = (cameraHeight + sized(CAPSULE_CAMERA_RIM_DP) * 2)
+            .coerceIn(sized(CAPSULE_MIN_HEIGHT_DP), sized(CAPSULE_MAX_HEIGHT_DP))
+            .coerceAtLeast(cameraHeight + dp(4))
         val artSlot = height
-        val waveSlot = dp(CAPSULE_WAVE_SLOT_DP)
+        val waveSlot = sized(CAPSULE_WAVE_SLOT_DP)
         val top = camera?.let { (it.centerY() - height / 2).coerceAtLeast(dp(2)) }
             ?: (statusBarHeight + dp(6))
 
@@ -1359,9 +1431,11 @@ class FloatingPlayerOverlay(
             left.coerceIn(edge, max(edge, screenWidth - edge - width))
 
         if (camera == null) {
-            val width = artSlot + dp(CAPSULE_NO_CAMERA_GAP_DP) + waveSlot
+            val width = artSlot + sized(CAPSULE_NO_CAMERA_GAP_DP) + waveSlot
             val left = clampLeft(screenWidth / 2 - width / 2, width)
-            return CapsuleLayout(left, top, width, height, left, left + width - waveSlot)
+            return CapsuleLayout(
+                left, top, width, height, left, left + width - waveSlot, artSlot, waveSlot
+            )
         }
 
         // Rim beside a corner camera matches the rim above and below it.
@@ -1377,7 +1451,9 @@ class FloatingPlayerOverlay(
                 CapsuleLayout(
                     left, top, centredWidth, height,
                     artLeft = left + (wing - artSlot) / 2,
-                    waveLeft = left + centredWidth - wing + (wing - waveSlot) / 2
+                    waveLeft = left + centredWidth - wing + (wing - waveSlot) / 2,
+                    artSlot = artSlot,
+                    waveSlot = waveSlot
                 )
             }
             camera.centerX() < screenWidth / 2 -> {
@@ -1385,7 +1461,9 @@ class FloatingPlayerOverlay(
                 CapsuleLayout(
                     left, top, besideWidth, height,
                     artLeft = camera.right + gap,
-                    waveLeft = camera.right + gap + artSlot
+                    waveLeft = camera.right + gap + artSlot,
+                    artSlot = artSlot,
+                    waveSlot = waveSlot
                 )
             }
             else -> {
@@ -1394,7 +1472,9 @@ class FloatingPlayerOverlay(
                 CapsuleLayout(
                     left, top, besideWidth, height,
                     artLeft = left,
-                    waveLeft = left + artSlot
+                    waveLeft = left + artSlot,
+                    artSlot = artSlot,
+                    waveSlot = waveSlot
                 )
             }
         }
@@ -1437,10 +1517,6 @@ class FloatingPlayerOverlay(
 
     private fun expandedWidth(): Int = displayWidth() - dp(24)
 
-    private fun expandedCardTop(): Int =
-        capsuleVisibleTop() - pillTouchTop() + capsuleVisibleHeight() + dp(8)
-
-    private fun expandedHeight(): Int = expandedCardTop() + dp(196)
 
     private fun openMusicPlayer() {
         val intent = Intent(context, MainActivity::class.java).apply {
@@ -1766,21 +1842,102 @@ class FloatingPlayerOverlay(
         setColor(0xFF000000.toInt())
     }
 
-    private fun capsuleBackground(): Drawable {
+    /** Draws above the morph shape without casting a second shadow. */
+    private fun raiseAboveShape(view: View) {
+        view.outlineProvider = null
+        view.elevation = dp(CONTENT_ELEVATION_DP).toFloat()
+    }
+
+    /** Pressed ripple shaped like the visible capsule, inside the larger touch area. */
+    private fun capsuleRipple(): Drawable {
         val left = capsuleVisibleLeft() - pillTouchLeft()
         val top = capsuleVisibleTop() - pillTouchTop()
         val right = pillTouchWidth() - left - capsuleVisibleWidth()
         val bottom = pillTouchHeight() - top - capsuleVisibleHeight()
-        val pill = rippleBackground(pillBackground(), 0x35FFFFFF)
-        return InsetDrawable(pill, left, top, max(0, right), max(0, bottom))
+        return InsetDrawable(
+            rippleOnly(pillBackground(), 0x35FFFFFF),
+            left,
+            top,
+            max(0, right),
+            max(0, bottom)
+        )
     }
 
-    private fun cardBackground() = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dp(26).toFloat()
-        orientation = GradientDrawable.Orientation.TL_BR
-        colors = intArrayOf(0xF0263433.toInt(), 0xF012171B.toInt())
-        setStroke(dp(1), 0x664A8C80.toInt())
+    /**
+     * The one surface shared by capsule and card. Its bounds, corner radius and colour follow
+     * [morphProgress]; the outline follows too, so the shadow morphs with it.
+     */
+    private inner class MorphShapeView(context: Context) : View(context) {
+        private val capsuleShape = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(0xFF000000.toInt())
+        }
+        private val cardShape = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            orientation = GradientDrawable.Orientation.TL_BR
+            colors = intArrayOf(0xFF263433.toInt(), 0xFF12171B.toInt())
+            setStroke(dp(1), 0x664A8C80)
+        }
+        private val bounds = Rect()
+        private var radius = 0f
+
+        /** Current shape bounds in window coordinates. */
+        val currentBounds: Rect get() = bounds
+
+        init {
+            elevation = dp(SHAPE_ELEVATION_DP).toFloat()
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(bounds, radius)
+                }
+            }
+        }
+
+        fun refresh() {
+            val progress = morphProgress
+            val originX = windowParams?.x ?: 0
+            val originY = windowParams?.y ?: 0
+            val left = capsuleVisibleLeft() - originX
+            val top = capsuleVisibleTop() - originY
+            val right = left + capsuleVisibleWidth()
+            val bottom = top + capsuleVisibleHeight()
+            if (progress <= 0f || cardRectOnScreen.isEmpty) {
+                bounds.set(left, top, right, bottom)
+            } else {
+                fun lerp(from: Int, to: Int) = (from + (to - from) * progress).toInt()
+                bounds.set(
+                    lerp(left, cardRectOnScreen.left - originX),
+                    lerp(top, cardRectOnScreen.top - originY),
+                    lerp(right, cardRectOnScreen.right - originX),
+                    lerp(bottom, cardRectOnScreen.bottom - originY)
+                )
+            }
+            val capsuleRadius = capsuleVisibleHeight() / 2f
+            radius = capsuleRadius + (dp(CARD_CORNER_RADIUS_DP) - capsuleRadius) * progress
+            invalidate()
+            invalidateOutline()
+        }
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            refresh()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            // Black capsule turns into the card colour over the first part of the growth.
+            val cardAlpha = (morphProgress / 0.6f).coerceIn(0f, 1f)
+            if (cardAlpha < 1f) {
+                capsuleShape.bounds = bounds
+                capsuleShape.cornerRadius = radius
+                capsuleShape.draw(canvas)
+            }
+            if (cardAlpha > 0f) {
+                cardShape.bounds = bounds
+                cardShape.cornerRadius = radius
+                cardShape.alpha = (cardAlpha * 255).toInt()
+                cardShape.draw(canvas)
+            }
+        }
     }
 
     private fun rippleBackground(content: Drawable, rippleColor: Int) =
