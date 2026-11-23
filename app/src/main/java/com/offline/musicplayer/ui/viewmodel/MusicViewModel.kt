@@ -15,6 +15,10 @@ import androidx.media3.session.SessionToken
 import com.offline.musicplayer.audio.EqualizerManager
 import com.offline.musicplayer.data.model.Album
 import com.offline.musicplayer.data.model.Artist
+import com.offline.musicplayer.data.model.CapsuleAnimationMode
+import com.offline.musicplayer.data.model.CapsulePosition
+import com.offline.musicplayer.data.model.CapsuleSettings
+import com.offline.musicplayer.data.model.SetupPromptState
 import com.offline.musicplayer.data.model.EqualizerState
 import com.offline.musicplayer.data.model.LyricsState
 import com.offline.musicplayer.data.model.PlaybackState
@@ -37,6 +41,7 @@ import com.offline.musicplayer.data.repository.RenameResult
 import com.offline.musicplayer.data.repository.TrackAudioInfoReader
 import com.offline.musicplayer.service.PlaybackService
 import com.offline.musicplayer.service.ServiceBridge
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,9 +49,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class PendingSongRename(val song: Song, val baseName: String)
@@ -71,14 +79,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val radioNowPlaying: StateFlow<RadioNowPlaying?> = ServiceBridge.radioNowPlaying
 
     private var mediaController: MediaController? = null
-    private var progressJob: Job? = null
     private var lyricsJob: Job? = null
     private var audioInfoJob: Job? = null
     private var audioInfoTrackId: Long? = null
     private val _lyricsState = MutableStateFlow(LyricsState())
     val lyricsState: StateFlow<LyricsState> = _lyricsState.asStateFlow()
-    private val _playerFeatureSettings = MutableStateFlow(PlayerFeatureSettings())
-    val playerFeatureSettings: StateFlow<PlayerFeatureSettings> = _playerFeatureSettings.asStateFlow()
+    val playerFeatureSettings: StateFlow<PlayerFeatureSettings> = preferences.playerFeatureSettings
+        .stateIn(viewModelScope, SharingStarted.Eagerly, PlayerFeatureSettings())
+    val capsuleSettings: StateFlow<CapsuleSettings> = preferences.capsuleSettings
+        .stateIn(viewModelScope, SharingStarted.Eagerly, CapsuleSettings())
+
+    /** Null until loaded, so one-time prompts are never shown before their flag is known. */
+    val setupPromptState: StateFlow<SetupPromptState?> = preferences.setupPromptState
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     private val _trackAudioInfo = MutableStateFlow<TrackAudioInfo?>(null)
     val trackAudioInfo: StateFlow<TrackAudioInfo?> = _trackAudioInfo.asStateFlow()
 
@@ -109,6 +122,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Playback state
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
+    private val positionRefresh = MutableStateFlow(0)
+
+    /**
+     * Playback position, kept out of [playbackState] so ticking only recomposes the readers
+     * of the position. It ticks only while playing and while someone collects it.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val playbackPosition: StateFlow<Long> = combine(
+        _playbackState.map { it.isPlaying }.distinctUntilChanged(),
+        _lyricsState.map { it.isEnabled }.distinctUntilChanged(),
+        positionRefresh
+    ) { isPlaying, lyricsEnabled, _ -> isPlaying to lyricsEnabled }
+        .flatMapLatest { (isPlaying, lyricsEnabled) ->
+            flow {
+                while (true) {
+                    emit(mediaController?.currentPosition ?: 0L)
+                    if (!isPlaying) break
+                    delay(if (lyricsEnabled) 50L else 500L)
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(1_000), 0L)
+
     private val _openNowPlayingRequest = MutableStateFlow(0)
     val openNowPlayingRequest: StateFlow<Int> = _openNowPlayingRequest.asStateFlow()
 
@@ -152,23 +188,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     init {
         connectToPlaybackService()
         viewModelScope.launch {
-            combine(
-                preferences.crossfadeSeconds,
-                preferences.playbackSpeed,
-                preferences.pitchLocked,
-                preferences.lyricsFontSizeSp,
-                preferences.lyricsOffsetMs
-            ) { crossfade, speed, pitchLocked, fontSizeSp, offsetMs ->
-                PlayerFeatureSettings(
-                    crossfadeSeconds = crossfade,
-                    playbackSpeed = speed,
-                    pitchLocked = pitchLocked,
-                    lyricsFontSizeSp = fontSizeSp,
-                    lyricsOffsetMs = offsetMs
-                )
-            }.collect { _playerFeatureSettings.value = it }
-        }
-        viewModelScope.launch {
             try {
                 preferences.migrateLegacyLyricsMode()
             } catch (e: Exception) {
@@ -203,16 +222,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 _playbackState.update {
+                    val knownDuration = player.duration
+                        .takeIf { duration -> duration > 0 && it.currentSong?.isLiveStream != true }
                     it.copy(
-                        isBuffering = playbackState == Player.STATE_BUFFERING
+                        isBuffering = playbackState == Player.STATE_BUFFERING,
+                        duration = knownDuration ?: it.duration
                     )
                 }
-                updatePlaybackProgressTicker(player.isPlaying)
+                refreshPosition()
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playbackState.update { it.copy(isPlaying = isPlaying) }
-                updatePlaybackProgressTicker(isPlaying)
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                refreshPosition()
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -224,11 +253,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 _playbackState.update {
                     it.copy(
                         currentSong = currentSong,
-                        currentPosition = player.currentPosition,
                         duration = duration,
                         currentQueueIndex = currentIndex
                     )
                 }
+                refreshPosition()
                 loadLyricsForTrack(
                     currentSong?.let { song ->
                         if (duration > 0) song.copy(duration = duration) else song
@@ -272,30 +301,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 currentSong = currentSong,
                 isPlaying = controller.isPlaying,
-                currentPosition = controller.currentPosition,
                 duration = duration,
                 isShuffleEnabled = controller.shuffleModeEnabled,
                 repeatMode = controller.repeatMode,
                 currentQueueIndex = controller.currentMediaItemIndex
             )
         }
-        updatePlaybackProgressTicker(controller.isPlaying)
+        refreshPosition()
     }
 
-    private fun updatePlaybackProgressTicker(isPlaying: Boolean) {
-        progressJob?.cancel()
-        if (isPlaying) {
-            progressJob = viewModelScope.launch {
-                while (isActive) {
-                    mediaController?.let { controller ->
-                        val pos = controller.currentPosition
-                        val dur = if (controller.duration > 0) controller.duration else _playbackState.value.duration
-                        _playbackState.update { it.copy(currentPosition = pos, duration = dur) }
-                    }
-                    delay(if (_lyricsState.value.isEnabled) 50L else 500L)
-                }
-            }
-        }
+    private fun refreshPosition() {
+        positionRefresh.update { it + 1 }
     }
 
     fun loadLibrary() {
@@ -335,7 +351,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 queue = queue,
                 currentSong = song,
                 currentQueueIndex = startIndex,
-                currentPosition = 0L,
                 duration = song.duration
             )
         }
@@ -435,7 +450,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (_playbackState.value.currentSong?.isLiveStream == true) return
         val controller = mediaController ?: return
         controller.seekTo(positionMs)
-        _playbackState.update { it.copy(currentPosition = positionMs) }
+        refreshPosition()
     }
 
     fun skipNext() {
@@ -511,6 +526,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showFloatingPlayer() {
+        viewModelScope.launch { preferences.setCapsuleEnabled(true) }
         mediaController?.sendCustomCommand(
             SessionCommand(ServiceBridge.COMMAND_SHOW_FLOATING_PLAYER, Bundle.EMPTY),
             Bundle.EMPTY
@@ -529,12 +545,45 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         applyLyricsEnabled(enabled, persist = true)
     }
 
+    fun setCapsuleEnabled(enabled: Boolean) {
+        viewModelScope.launch { preferences.setCapsuleEnabled(enabled) }
+    }
+
+    fun setCapsulePosition(position: CapsulePosition) {
+        viewModelScope.launch { preferences.setCapsulePosition(position) }
+    }
+
+    fun setCapsuleAnimationMode(mode: CapsuleAnimationMode) {
+        viewModelScope.launch { preferences.setCapsuleAnimationMode(mode) }
+    }
+
+    fun setCapsuleSwipeGestures(enabled: Boolean) {
+        viewModelScope.launch { preferences.setCapsuleSwipeGestures(enabled) }
+    }
+
+    fun markOverlaySetupPrompted() {
+        viewModelScope.launch { preferences.markOverlaySetupPrompted() }
+    }
+
+    fun markBatteryGuidanceShown() {
+        viewModelScope.launch { preferences.markBatteryGuidanceShown() }
+    }
+
+    fun resetSettings() {
+        viewModelScope.launch { preferences.resetSettings() }
+    }
+
     fun setCrossfadeSeconds(seconds: Int) {
         viewModelScope.launch { preferences.setCrossfadeSeconds(seconds) }
     }
 
     fun setPlaybackSpeed(speed: Float) {
-        val rounded = (speed.coerceIn(0.75f, 1.5f) * 100f).toInt() / 100f
+        val rounded = (
+            speed.coerceIn(
+                PlayerPreferences.MIN_PLAYBACK_SPEED,
+                PlayerPreferences.MAX_PLAYBACK_SPEED
+            ) * 100f
+        ).toInt() / 100f
         viewModelScope.launch { preferences.setPlaybackSpeed(rounded) }
     }
 
@@ -598,8 +647,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             )
             loadLyricsForTrack(_playbackState.value.currentSong)
         }
-
-        updatePlaybackProgressTicker(_playbackState.value.isPlaying)
 
         if (persist) {
             viewModelScope.launch {
@@ -797,7 +844,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         currentSong = null,
                         isPlaying = false,
-                        currentPosition = 0L,
                         duration = 0L,
                         queue = emptyList()
                     )
@@ -948,7 +994,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        progressJob?.cancel()
         lyricsJob?.cancel()
         lyricsRepository.cancelActiveRequest()
         audioInfoJob?.cancel()

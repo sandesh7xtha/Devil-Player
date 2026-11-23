@@ -400,7 +400,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun updateCrossfadeMonitor() {
-        if (crossfadeSeconds <= 0) {
+        // Polling is only useful while audio plays; onIsPlayingChanged restarts it.
+        if (crossfadeSeconds <= 0 || !exoPlayer.isPlaying) {
             crossfadeMonitorJob?.cancel()
             crossfadeMonitorJob = null
             return

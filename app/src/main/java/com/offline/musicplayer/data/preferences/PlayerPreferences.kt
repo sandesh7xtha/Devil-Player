@@ -6,16 +6,25 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.offline.musicplayer.data.model.CapsuleAnimationMode
+import com.offline.musicplayer.data.model.CapsulePosition
+import com.offline.musicplayer.data.model.CapsuleSettings
+import com.offline.musicplayer.data.model.PlayerFeatureSettings
+import com.offline.musicplayer.data.model.SetupPromptState
 import com.offline.musicplayer.data.model.Song
 import com.offline.musicplayer.data.model.StreamInfo
 import com.offline.musicplayer.data.model.TrackSourceType
+import java.io.IOException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
@@ -41,9 +50,43 @@ class PlayerPreferences(private val context: Context) {
         private val KEY_PITCH_LOCKED = booleanPreferencesKey("playback_pitch_locked")
         private val KEY_LYRICS_FONT_SIZE_SP = intPreferencesKey("lyrics_font_size_sp")
         private val KEY_LYRICS_OFFSET_MS = intPreferencesKey("lyrics_offset_ms")
+        private val KEY_CAPSULE_ENABLED = booleanPreferencesKey("capsule_enabled")
+        private val KEY_CAPSULE_ANIMATION_MODE = stringPreferencesKey("capsule_animation_mode")
+        private val KEY_CAPSULE_POSITION = stringPreferencesKey("capsule_position")
+        private val KEY_CAPSULE_SWIPE_GESTURES = booleanPreferencesKey("capsule_swipe_gestures")
+        private val KEY_OVERLAY_SETUP_PROMPTED = booleanPreferencesKey("overlay_setup_prompted")
+        private val KEY_BATTERY_GUIDANCE_SHOWN = booleanPreferencesKey("battery_guidance_shown")
+
+        const val MIN_PLAYBACK_SPEED = 0.75f
+        const val MAX_PLAYBACK_SPEED = 1.5f
+        const val MAX_CROSSFADE_SECONDS = 8
+        const val MIN_LYRICS_FONT_SP = 16
+        const val MAX_LYRICS_FONT_SP = 32
+        const val MAX_LYRICS_OFFSET_MS = 500
+
+        private val RESETTABLE_KEYS = listOf(
+            KEY_CROSSFADE_SECONDS,
+            KEY_PLAYBACK_SPEED,
+            KEY_PITCH_LOCKED,
+            KEY_LYRICS_FONT_SIZE_SP,
+            KEY_LYRICS_OFFSET_MS,
+            KEY_CAPSULE_ENABLED,
+            KEY_CAPSULE_ANIMATION_MODE,
+            KEY_CAPSULE_POSITION,
+            KEY_CAPSULE_SWIPE_GESTURES
+        )
     }
 
-    val shuffleEnabled: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    // A corrupt or unreadable file falls back to defaults instead of crashing collectors.
+    private val data: Flow<Preferences> = context.dataStore.data.catch { error ->
+        if (error is IOException) emit(emptyPreferences()) else throw error
+    }
+
+    // Each flow only emits when its own value changes, not on every unrelated write.
+    private fun <T> setting(read: (Preferences) -> T): Flow<T> =
+        data.map(read).distinctUntilChanged()
+
+    val shuffleEnabled: Flow<Boolean> = setting { preferences ->
         preferences[KEY_SHUFFLE_ENABLED] ?: false
     }
 
@@ -53,7 +96,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val repeatMode: Flow<Int> = context.dataStore.data.map { preferences ->
+    val repeatMode: Flow<Int> = setting { preferences ->
         preferences[KEY_REPEAT_MODE] ?: 0
     }
 
@@ -63,7 +106,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val lastPlayedSongId: Flow<Long> = context.dataStore.data.map { preferences ->
+    val lastPlayedSongId: Flow<Long> = setting { preferences ->
         preferences[KEY_LAST_PLAYED_SONG_ID] ?: -1L
     }
 
@@ -73,7 +116,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val favoriteSongIds: Flow<Set<String>> = context.dataStore.data.map { preferences ->
+    val favoriteSongIds: Flow<Set<String>> = setting { preferences ->
         preferences[KEY_FAVORITE_SONG_IDS] ?: emptySet()
     }
 
@@ -92,7 +135,7 @@ class PlayerPreferences(private val context: Context) {
         return isFavorite
     }
 
-    val favoriteRadioStations: Flow<List<Song>> = context.dataStore.data.map { preferences ->
+    val favoriteRadioStations: Flow<List<Song>> = setting { preferences ->
         parseFavoriteRadioStations(preferences[KEY_FAVORITE_RADIO_STATIONS].orEmpty())
     }
 
@@ -177,7 +220,7 @@ class PlayerPreferences(private val context: Context) {
         emptyList()
     }
 
-    val equalizerEnabled: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val equalizerEnabled: Flow<Boolean> = setting { preferences ->
         preferences[KEY_EQUALIZER_ENABLED] ?: false
     }
 
@@ -187,7 +230,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val equalizerPreset: Flow<String> = context.dataStore.data.map { preferences ->
+    val equalizerPreset: Flow<String> = setting { preferences ->
         preferences[KEY_EQUALIZER_PRESET] ?: "Flat"
     }
 
@@ -197,7 +240,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val equalizerBandLevels: Flow<Map<Int, Int>> = context.dataStore.data.map { preferences ->
+    val equalizerBandLevels: Flow<Map<Int, Int>> = setting { preferences ->
         val raw = preferences[KEY_EQUALIZER_BAND_LEVELS] ?: ""
         parseBandLevels(raw)
     }
@@ -209,7 +252,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val smartModeEnabled: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val smartModeEnabled: Flow<Boolean> = setting { preferences ->
         preferences[KEY_SMART_MODE_ENABLED] ?: false
     }
 
@@ -219,7 +262,7 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val lyricsEnabled: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val lyricsEnabled: Flow<Boolean> = setting { preferences ->
         preferences[KEY_LYRICS_ENABLED] ?: false
     }
 
@@ -230,27 +273,27 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val crossfadeSeconds: Flow<Int> = context.dataStore.data.map { preferences ->
-        (preferences[KEY_CROSSFADE_SECONDS] ?: 0).coerceIn(0, 8)
+    val crossfadeSeconds: Flow<Int> = setting { preferences ->
+        (preferences[KEY_CROSSFADE_SECONDS] ?: 0).coerceIn(0, MAX_CROSSFADE_SECONDS)
     }
 
     suspend fun setCrossfadeSeconds(seconds: Int) {
         context.dataStore.edit { preferences ->
-            preferences[KEY_CROSSFADE_SECONDS] = seconds.coerceIn(0, 8)
+            preferences[KEY_CROSSFADE_SECONDS] = seconds.coerceIn(0, MAX_CROSSFADE_SECONDS)
         }
     }
 
-    val playbackSpeed: Flow<Float> = context.dataStore.data.map { preferences ->
-        (preferences[KEY_PLAYBACK_SPEED] ?: 1f).coerceIn(0.75f, 1.5f)
+    val playbackSpeed: Flow<Float> = setting { preferences ->
+        (preferences[KEY_PLAYBACK_SPEED] ?: 1f).coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
     }
 
     suspend fun setPlaybackSpeed(speed: Float) {
         context.dataStore.edit { preferences ->
-            preferences[KEY_PLAYBACK_SPEED] = speed.coerceIn(0.75f, 1.5f)
+            preferences[KEY_PLAYBACK_SPEED] = speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
         }
     }
 
-    val pitchLocked: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val pitchLocked: Flow<Boolean> = setting { preferences ->
         preferences[KEY_PITCH_LOCKED] ?: true
     }
 
@@ -260,23 +303,88 @@ class PlayerPreferences(private val context: Context) {
         }
     }
 
-    val lyricsFontSizeSp: Flow<Int> = context.dataStore.data.map { preferences ->
-        (preferences[KEY_LYRICS_FONT_SIZE_SP] ?: 22).coerceIn(16, 32)
+    val lyricsFontSizeSp: Flow<Int> = setting { preferences ->
+        (preferences[KEY_LYRICS_FONT_SIZE_SP] ?: 22).coerceIn(MIN_LYRICS_FONT_SP, MAX_LYRICS_FONT_SP)
     }
 
     suspend fun setLyricsFontSizeSp(sizeSp: Int) {
         context.dataStore.edit { preferences ->
-            preferences[KEY_LYRICS_FONT_SIZE_SP] = sizeSp.coerceIn(16, 32)
+            preferences[KEY_LYRICS_FONT_SIZE_SP] = sizeSp.coerceIn(MIN_LYRICS_FONT_SP, MAX_LYRICS_FONT_SP)
         }
     }
 
-    val lyricsOffsetMs: Flow<Int> = context.dataStore.data.map { preferences ->
-        (preferences[KEY_LYRICS_OFFSET_MS] ?: 0).coerceIn(-500, 500)
+    val lyricsOffsetMs: Flow<Int> = setting { preferences ->
+        (preferences[KEY_LYRICS_OFFSET_MS] ?: 0).coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
     }
 
     suspend fun setLyricsOffsetMs(offsetMs: Int) {
         context.dataStore.edit { preferences ->
-            preferences[KEY_LYRICS_OFFSET_MS] = offsetMs.coerceIn(-500, 500)
+            preferences[KEY_LYRICS_OFFSET_MS] = offsetMs.coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
+        }
+    }
+
+    val playerFeatureSettings: Flow<PlayerFeatureSettings> = setting { preferences ->
+        PlayerFeatureSettings(
+            crossfadeSeconds = (preferences[KEY_CROSSFADE_SECONDS] ?: 0)
+                .coerceIn(0, MAX_CROSSFADE_SECONDS),
+            playbackSpeed = (preferences[KEY_PLAYBACK_SPEED] ?: 1f)
+                .coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED),
+            pitchLocked = preferences[KEY_PITCH_LOCKED] ?: true,
+            lyricsFontSizeSp = (preferences[KEY_LYRICS_FONT_SIZE_SP] ?: 22)
+                .coerceIn(MIN_LYRICS_FONT_SP, MAX_LYRICS_FONT_SP),
+            lyricsOffsetMs = (preferences[KEY_LYRICS_OFFSET_MS] ?: 0)
+                .coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
+        )
+    }
+
+    val capsuleSettings: Flow<CapsuleSettings> = setting { preferences ->
+        CapsuleSettings(
+            enabled = preferences[KEY_CAPSULE_ENABLED] ?: true,
+            position = preferences[KEY_CAPSULE_POSITION]
+                ?.let { name -> CapsulePosition.entries.firstOrNull { it.name == name } }
+                ?: CapsulePosition.AROUND_CAMERA,
+            animationMode = preferences[KEY_CAPSULE_ANIMATION_MODE]
+                ?.let { name -> CapsuleAnimationMode.entries.firstOrNull { it.name == name } }
+                ?: CapsuleAnimationMode.FULL,
+            swipeGestures = preferences[KEY_CAPSULE_SWIPE_GESTURES] ?: true
+        )
+    }
+
+    suspend fun setCapsuleEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_CAPSULE_ENABLED] = enabled }
+    }
+
+    suspend fun setCapsulePosition(position: CapsulePosition) {
+        context.dataStore.edit { it[KEY_CAPSULE_POSITION] = position.name }
+    }
+
+    suspend fun setCapsuleAnimationMode(mode: CapsuleAnimationMode) {
+        context.dataStore.edit { it[KEY_CAPSULE_ANIMATION_MODE] = mode.name }
+    }
+
+    suspend fun setCapsuleSwipeGestures(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_CAPSULE_SWIPE_GESTURES] = enabled }
+    }
+
+    val setupPromptState: Flow<SetupPromptState> = setting { preferences ->
+        SetupPromptState(
+            overlaySetupPrompted = preferences[KEY_OVERLAY_SETUP_PROMPTED] ?: false,
+            batteryGuidanceShown = preferences[KEY_BATTERY_GUIDANCE_SHOWN] ?: false
+        )
+    }
+
+    suspend fun markOverlaySetupPrompted() {
+        context.dataStore.edit { it[KEY_OVERLAY_SETUP_PROMPTED] = true }
+    }
+
+    suspend fun markBatteryGuidanceShown() {
+        context.dataStore.edit { it[KEY_BATTERY_GUIDANCE_SHOWN] = true }
+    }
+
+    /** Restores playback, lyrics and capsule settings; library data and favorites are kept. */
+    suspend fun resetSettings() {
+        context.dataStore.edit { preferences ->
+            RESETTABLE_KEYS.forEach { preferences.remove(it) }
         }
     }
 

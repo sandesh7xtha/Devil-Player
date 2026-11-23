@@ -62,34 +62,12 @@ import com.offline.musicplayer.ui.theme.AuraTextTertiary
 @Composable
 fun EqualizerSheet(
     equalizerState: EqualizerState,
-    smartModeState: SmartModeState,
-    lyricsState: LyricsState,
-    playerFeatureSettings: PlayerFeatureSettings,
     onEnabledChange: (Boolean) -> Unit,
-    onSmartModeEnabledChange: (Boolean) -> Unit,
-    onLyricsEnabledChange: (Boolean) -> Unit,
-    onCrossfadeSecondsChange: (Int) -> Unit,
-    onPlaybackSpeedChange: (Float) -> Unit,
-    onPitchLockChange: (Boolean) -> Unit,
-    onLyricsFontSizeChange: (Int) -> Unit,
-    onLyricsOffsetChange: (Int) -> Unit,
     onPresetSelected: (String) -> Unit,
     onBandLevelChange: (bandIndex: Int, levelMb: Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var crossfadeValue by remember(playerFeatureSettings.crossfadeSeconds) {
-        mutableFloatStateOf(playerFeatureSettings.crossfadeSeconds.toFloat())
-    }
-    var speedValue by remember(playerFeatureSettings.playbackSpeed) {
-        mutableFloatStateOf(playerFeatureSettings.playbackSpeed)
-    }
-    var lyricsFontSizeValue by remember(playerFeatureSettings.lyricsFontSizeSp) {
-        mutableIntStateOf(playerFeatureSettings.lyricsFontSizeSp)
-    }
-    var lyricsOffsetValue by remember(playerFeatureSettings.lyricsOffsetMs) {
-        mutableFloatStateOf(playerFeatureSettings.lyricsOffsetMs.toFloat())
-    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -111,13 +89,13 @@ fun EqualizerSheet(
             ) {
                 Column {
                     Text(
-                        text = "Audio settings",
+                        text = "Equalizer",
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.Bold,
                         color = AuraTextPrimary
                     )
                     Text(
-                        text = "Equalizer, playback and lyrics",
+                        text = "Shape your sound with presets or custom bands",
                         style = MaterialTheme.typography.bodyMedium,
                         color = AuraTextSecondary
                     )
@@ -132,222 +110,6 @@ fun EqualizerSheet(
                         uncheckedThumbColor = AuraTextSecondary,
                         uncheckedTrackColor = AuraSurfaceVariant
                     )
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(AuraCard)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Smart Loudness (-1 dB Target)",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = AuraTextPrimary
-                    )
-                    Text(
-                        text = when {
-                            !smartModeState.isSupported -> "Requires Android 9 or later"
-                            smartModeState.isAnalyzing -> "Analyzing track peak..."
-                            smartModeState.isEnabled -> "Flat per-track gain · no compression"
-                            else -> "Normalize each track while preserving dynamics"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AuraTextSecondary
-                    )
-                }
-                Switch(
-                    checked = smartModeState.isEnabled,
-                    enabled = smartModeState.isSupported,
-                    onCheckedChange = onSmartModeEnabledChange,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = AuraPrimary,
-                        checkedTrackColor = AuraPrimary.copy(alpha = 0.4f),
-                        uncheckedThumbColor = AuraTextSecondary,
-                        uncheckedTrackColor = AuraSurfaceVariant
-                    )
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(AuraCard)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Live Lyrics (Online)",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = AuraTextPrimary
-                    )
-                    Text(
-                        text = lyricsState.resolvedTitle?.let { title ->
-                            val status = if (lyricsState.isLoading) "Searching" else "Search used"
-                            "$status: $title · ${lyricsState.resolvedArtist.orEmpty()}"
-                        } ?: when {
-                            lyricsState.isLoading -> "Looking for synced lyrics online..."
-                            lyricsState.isEnabled -> "Online lyrics stay in memory for the active track only"
-                            else -> "Find free synced lyrics while playing · lyrics aren’t saved"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AuraTextSecondary
-                    )
-                }
-                Switch(
-                    checked = lyricsState.isEnabled,
-                    onCheckedChange = onLyricsEnabledChange,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = AuraPrimary,
-                        checkedTrackColor = AuraPrimary.copy(alpha = 0.4f),
-                        uncheckedThumbColor = AuraTextSecondary,
-                        uncheckedTrackColor = AuraSurfaceVariant
-                    )
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = "Playback & lyrics",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = AuraTextPrimary
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(AuraCard)
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Playback speed", color = AuraTextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text("${"%.2f".format(speedValue)}×", color = AuraSecondary, style = MaterialTheme.typography.labelMedium)
-                    }
-                    Text("0.75× — 1.50×", color = AuraTextTertiary, style = MaterialTheme.typography.labelSmall)
-                }
-                Slider(
-                    value = speedValue,
-                    onValueChange = { speedValue = ((it * 100f).toInt() / 100f).coerceIn(0.75f, 1.5f) },
-                    onValueChangeFinished = { onPlaybackSpeedChange(speedValue) },
-                    valueRange = 0.75f..1.5f,
-                    steps = 14,
-                    colors = SliderDefaults.colors(thumbColor = AuraSecondary, activeTrackColor = AuraSecondary)
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Keep original pitch", color = AuraTextPrimary, fontWeight = FontWeight.Medium)
-                        Text(
-                            if (playerFeatureSettings.pitchLocked) "Speed changes without raising or lowering the pitch" else "Pitch follows the playback speed",
-                            color = AuraTextSecondary,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    Switch(
-                        checked = playerFeatureSettings.pitchLocked,
-                        onCheckedChange = onPitchLockChange,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = AuraPrimary,
-                            checkedTrackColor = AuraPrimary.copy(alpha = 0.4f),
-                            uncheckedThumbColor = AuraTextSecondary,
-                            uncheckedTrackColor = AuraSurfaceVariant
-                        )
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Playlist crossfade", color = AuraTextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            if (crossfadeValue.toInt() == 0) "Off · gapless playback remains enabled" else "${crossfadeValue.toInt()} seconds between tracks",
-                            color = AuraTextSecondary,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    Text("${crossfadeValue.toInt()}s", color = AuraSecondary, style = MaterialTheme.typography.labelMedium)
-                }
-                Slider(
-                    value = crossfadeValue,
-                    onValueChange = { crossfadeValue = it.toInt().toFloat() },
-                    onValueChangeFinished = { onCrossfadeSecondsChange(crossfadeValue.toInt()) },
-                    valueRange = 0f..8f,
-                    steps = 7,
-                    colors = SliderDefaults.colors(thumbColor = AuraSecondary, activeTrackColor = AuraSecondary)
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Lyrics appearance", color = AuraTextPrimary, fontWeight = FontWeight.SemiBold)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Font size", color = AuraTextSecondary, style = MaterialTheme.typography.bodySmall)
-                    Text("${lyricsFontSizeValue} sp", color = AuraSecondary, style = MaterialTheme.typography.labelMedium)
-                }
-                Slider(
-                    value = lyricsFontSizeValue.toFloat(),
-                    onValueChange = { lyricsFontSizeValue = it.toInt().coerceIn(16, 32) },
-                    onValueChangeFinished = { onLyricsFontSizeChange(lyricsFontSizeValue) },
-                    valueRange = 16f..32f,
-                    steps = 15,
-                    colors = SliderDefaults.colors(thumbColor = AuraSecondary, activeTrackColor = AuraSecondary)
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Lyrics timing offset", color = AuraTextPrimary, fontWeight = FontWeight.Medium)
-                        Text("Shift lyric highlighting to match this track", color = AuraTextSecondary, style = MaterialTheme.typography.bodySmall)
-                    }
-                    val offsetMs = lyricsOffsetValue.toInt()
-                    Text(
-                        text = if (offsetMs > 0) "+${offsetMs}ms" else "${offsetMs}ms",
-                        color = AuraSecondary,
-                        style = MaterialTheme.typography.labelMedium
-                    )
-                }
-                Slider(
-                    value = lyricsOffsetValue,
-                    onValueChange = { lyricsOffsetValue = (it.toInt() / 50 * 50).toFloat() },
-                    onValueChangeFinished = { onLyricsOffsetChange(lyricsOffsetValue.toInt()) },
-                    valueRange = -500f..500f,
-                    steps = 19,
-                    colors = SliderDefaults.colors(thumbColor = AuraSecondary, activeTrackColor = AuraSecondary)
                 )
             }
 

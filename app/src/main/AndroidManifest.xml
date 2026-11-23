@@ -55,6 +55,20 @@
             </intent-filter>
         </service>
 
+        <!-- Only hosts the floating capsule above the status bar; reads no screen content. -->
+        <service
+            android:name=".service.CapsuleAccessibilityService"
+            android:exported="false"
+            android:label="@string/capsule_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/capsule_accessibility_service" />
+        </service>
+
     </application>
 
 </manifest>

@@ -32,7 +32,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -116,13 +115,11 @@ fun RadioScreen(
     val stations = if (selected.favorites) favoriteMatches else feed.items
 
     Column(modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            singleLine = true,
-            shape = RoundedCornerShape(16.dp),
-            placeholder = { Text("Search radio stations", color = AuraTextTertiary) }
+        SearchBarField(
+            query = query,
+            onQueryChange = { query = it },
+            onClear = { query = "" },
+            placeholder = "Search radio stations"
         )
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
@@ -306,13 +303,11 @@ fun JamendoScreen(
     }
 
     Column(modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            singleLine = true,
-            shape = RoundedCornerShape(16.dp),
-            placeholder = { Text("Search independent music", color = AuraTextTertiary) }
+        SearchBarField(
+            query = query,
+            onQueryChange = { query = it },
+            onClear = { query = "" },
+            placeholder = "Search independent music"
         )
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp),

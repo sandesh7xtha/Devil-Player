@@ -13,4 +13,6 @@
     <string name="sleep_timer">Sleep Timer</string>
     <string name="notification_channel_name">Music Playback</string>
     <string name="notification_channel_desc">Shows playback controls and currently playing track</string>
+    <string name="capsule_accessibility_label">Devil Play capsule</string>
+    <string name="capsule_accessibility_description">Shows the Devil Play music capsule above the status bar so it can wrap the front camera and respond to taps. It only checks whether the notification shade is open, to hide the capsule. It does not read, store or share anything on your screen.</string>
 </resources>

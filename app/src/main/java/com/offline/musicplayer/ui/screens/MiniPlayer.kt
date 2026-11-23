@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -23,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.Card
@@ -57,9 +57,9 @@ import com.offline.musicplayer.ui.theme.AuraTextSecondary
 fun MiniPlayer(
     playbackState: PlaybackState,
     radioNowPlaying: RadioNowPlaying? = null,
+    positionMs: () -> Long,
     onPlayPause: () -> Unit,
     onSkipNext: () -> Unit,
-    onShowFloatingController: () -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -81,6 +81,7 @@ fun MiniPlayer(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 6.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .clickable(onClick = onClick),
@@ -104,7 +105,15 @@ fun MiniPlayer(
                     Box(Modifier.fillMaxWidth().height(3.dp).background(Color(0xFFFF5252)))
                 } else {
                     LinearProgressIndicator(
-                        progress = { playbackState.progress },
+                        // Read inside the lambda so position ticks only redraw the bar.
+                        progress = {
+                            val duration = playbackState.duration
+                            if (duration > 0) {
+                                (positionMs().toFloat() / duration).coerceIn(0f, 1f)
+                            } else {
+                                0f
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth().height(3.dp),
                         color = AuraSecondary,
                         trackColor = AuraSurfaceVariant.copy(alpha = 0.4f)
@@ -205,18 +214,6 @@ fun MiniPlayer(
                             contentDescription = "Next",
                             tint = AuraTextPrimary,
                             modifier = Modifier.size(26.dp)
-                        )
-                    }
-
-                    BouncingIconButton(
-                        onClick = onShowFloatingController,
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PictureInPictureAlt,
-                            contentDescription = "Show floating player controls",
-                            tint = AuraSecondary,
-                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
