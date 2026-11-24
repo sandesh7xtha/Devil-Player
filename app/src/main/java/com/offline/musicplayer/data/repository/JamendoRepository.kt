@@ -38,11 +38,25 @@ class JamendoRepository(private val clientId: String) {
         check(isConfigured) { "Jamendo is not configured. Add JAMENDO_CLIENT_ID to local.properties." }
         val response = api.tracks(
             clientId = clientId,
+            order = if (search.isNullOrBlank()) "popularity_week" else "relevance",
             search = search?.takeIf(String::isNotBlank),
             fuzzyTags = genre?.takeIf { it.isNotBlank() && !it.equals("Trending", true) }
         )
-        if (!response.isSuccessful) throw IOException("Jamendo returned HTTP ${response.code()}")
-        return response.body()?.results.orEmpty().mapNotNull(::toSong)
+        val body = response.body()
+        val apiHeaders = body?.headers
+        if (apiHeaders != null &&
+            (apiHeaders.code != 0 || apiHeaders.status.equals("failed", ignoreCase = true))
+        ) {
+            throw IOException(
+                apiHeaders.errorMessage.takeIf(String::isNotBlank)
+                    ?: "Jamendo rejected the request (code ${apiHeaders.code})."
+            )
+        }
+        if (!response.isSuccessful) {
+            throw IOException("Jamendo returned HTTP ${response.code()}.")
+        }
+        if (body == null) throw IOException("Jamendo returned an empty response.")
+        return body.results.mapNotNull(::toSong)
     }
 
     private fun toSong(track: JamendoTrackDto): Song? {

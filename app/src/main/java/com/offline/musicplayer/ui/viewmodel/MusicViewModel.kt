@@ -414,8 +414,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 throw e
             } catch (e: Exception) {
                 android.util.Log.e("MusicViewModel", "Could not load Jamendo tracks", e)
+                val message = when (e) {
+                    is java.net.UnknownHostException -> "Can't reach Jamendo. Check your internet connection and retry."
+                    is java.net.SocketTimeoutException -> "Jamendo took too long to respond. Please retry."
+                    else -> e.message?.takeIf(String::isNotBlank)?.take(180)
+                        ?.let { "Jamendo: $it" }
+                        ?: "Could not load Jamendo music. Check your connection and retry."
+                }
                 _jamendoFeed.update {
-                    it.copy(isLoading = false, errorMessage = "Could not load music. Check your connection and try again.")
+                    it.copy(isLoading = false, errorMessage = message)
                 }
             }
         }

@@ -318,7 +318,7 @@ private fun CapsuleSection(settings: CapsuleSettings, actions: SettingsActions) 
         RowDivider()
         ChoiceRow(
             title = "Size",
-            subtitle = "Capsule height and width; it always stays big enough to wrap the camera",
+            subtitle = "Small matches Below status bar; larger sizes add room around the camera",
             options = CapsuleSize.entries,
             selected = settings.size,
             label = { it.label },

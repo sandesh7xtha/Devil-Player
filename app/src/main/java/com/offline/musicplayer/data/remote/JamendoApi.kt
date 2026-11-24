@@ -6,7 +6,16 @@ import retrofit2.http.GET
 import retrofit2.http.Query
 
 data class JamendoResponse<T>(
+    @SerializedName("headers") val headers: JamendoResponseHeaders? = null,
     @SerializedName("results") val results: List<T> = emptyList()
+)
+
+data class JamendoResponseHeaders(
+    val status: String = "",
+    val code: Int = 0,
+    @SerializedName("error_message") val errorMessage: String = "",
+    val warnings: String = "",
+    @SerializedName("results_count") val resultsCount: Int = 0
 )
 
 data class JamendoTrackDto(
@@ -25,7 +34,7 @@ interface JamendoApi {
         @Query("client_id") clientId: String,
         @Query("format") format: String = "json",
         @Query("limit") limit: Int = 40,
-        @Query("order") order: String = "popularity_week",
+        @Query("order") order: String,
         @Query("audioformat") audioFormat: String = "mp32",
         @Query("imagesize") imageSize: Int = 300,
         @Query("search") search: String? = null,
